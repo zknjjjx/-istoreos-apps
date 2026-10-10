@@ -1,0 +1,11 @@
+Package: luci-app-cftunnel
+Version: 1.0.0-1
+Depends: libc, luci-base
+Source: https://github.com/zknjjjx/istoreos-apps
+SourceName: luci-app-cftunnel
+License: MIT
+Section: luci
+Maintainer: zknjjjx
+Architecture: all
+Installed-Size: 40
+Description: Cloudflare 隧道：在 LuCI 里管理 Cloudflare Tunnel（API 令牌一键建隧道、绑定域名、自动 DNS），自动下载 cloudflared
