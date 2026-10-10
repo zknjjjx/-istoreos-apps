@@ -1,0 +1,42 @@
+name: luci-app-cftunnel
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号，如 1.0.0-r4'
+        required: true
+        default: '1.0.0-r4'
+  push:
+    tags: ['cftunnel-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 版本号
+        run: |
+          V="${{ github.event.inputs.version }}"
+          [ -n "$V" ] || V="${GITHUB_REF_NAME#cftunnel-v}"
+          echo "V=$V" >> $GITHUB_ENV
+      - name: 打包 arm64 / amd64
+        run: |
+          cd luci-app-cftunnel
+          for a in arm64 amd64; do sudo sh build/build-apk.sh "$V" $a; done
+          ls -la dist
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cftunnel-v${{ env.V }}
+          name: luci-app-cftunnel ${{ env.V }}
+          body: |
+            Cloudflare 隧道 LuCI 插件，自带 cloudflared。
+            适用于新版 iStoreOS / OpenWrt 25.12+（apk 包管理器）。
+            - 斐讯 N1 等 ARM64 设备：下载 `-arm64.apk`
+            - x86 软路由：下载 `-amd64.apk`
+            安装：iStore → 手动安装 → 上传 apk；或 `apk add --allow-untrusted xxx.apk`
+          files: luci-app-cftunnel/dist/*.apk
