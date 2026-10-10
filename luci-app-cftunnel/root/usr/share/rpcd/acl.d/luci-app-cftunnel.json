@@ -1,0 +1,28 @@
+{
+	"luci-app-cftunnel": {
+		"description": "Cloudflare Tunnel",
+		"read": {
+			"file": {
+				"/usr/libexec/cftunnel status": [
+					"exec"
+				]
+			},
+			"uci": [
+				"cftunnel"
+			]
+		},
+		"write": {
+			"file": {
+				"/usr/libexec/cftunnel": [
+					"exec"
+				],
+				"/usr/libexec/cftunnel *": [
+					"exec"
+				]
+			},
+			"uci": [
+				"cftunnel"
+			]
+		}
+	}
+}
