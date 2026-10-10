@@ -1,0 +1,8 @@
+{
+	"admin/services/cftunnel": {
+		"title": "Cloudflare 隧道",
+		"order": 60,
+		"action": { "type": "view", "path": "cftunnel" },
+		"depends": { "acl": [ "luci-app-cftunnel" ] }
+	}
+}
