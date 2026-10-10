@@ -26,7 +26,9 @@ echo /etc/config/cftunnel > $W/files/lib/apk/packages/luci-app-cftunnel.conffile
 (cd $W/files && find . -type f | sed 's#^\.##' | sort) > $W/files/lib/apk/packages/luci-app-cftunnel.list
 chmod 755 $W/files/usr/libexec/cftunnel $W/files/etc/init.d/cftunnel
 O=luci-app-cftunnel-$V-$ARCH.apk
-cd /tmp && unshare -r $C/apk.static mkpkg \
+# root 直接跑；普通用户用 unshare 假装 root（保证包内文件属主是 root）
+RUN=""; [ "$(id -u)" = 0 ] || RUN="unshare -r"
+cd /tmp && $RUN $C/apk.static mkpkg \
  --info "name:luci-app-cftunnel" --info "version:$V" \
  --info "description:Cloudflare Tunnel manager for LuCI (cloudflared bundled)" \
  --info "arch:noarch" --info "license:MIT" --info "origin:luci-app-cftunnel" --info "maintainer:zknjjjx" \
