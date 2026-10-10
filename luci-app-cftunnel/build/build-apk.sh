@@ -25,6 +25,7 @@ mkdir -p $W/files/lib/apk/packages
 echo /etc/config/cftunnel > $W/files/lib/apk/packages/luci-app-cftunnel.conffiles
 (cd $W/files && find . -type f | sed 's#^\.##' | sort) > $W/files/lib/apk/packages/luci-app-cftunnel.list
 chmod 755 $W/files/usr/libexec/cftunnel $W/files/etc/init.d/cftunnel
+[ "$(id -u)" = 0 ] && chown -R 0:0 $W/files
 O=luci-app-cftunnel-$V-$ARCH.apk
 # root 直接跑；普通用户用 unshare 假装 root（保证包内文件属主是 root）
 RUN=""; [ "$(id -u)" = 0 ] || RUN="unshare -r"
