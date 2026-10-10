@@ -1,0 +1,8 @@
+
+config main 'main'
+	option api_token ''
+	option account_id ''
+	option proxy 'https://9797.cc.cd/'
+	option protocol 'http2'
+	option ip_version 'auto'
+	option autostart '1'
