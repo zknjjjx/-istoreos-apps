@@ -1,0 +1,5 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+/etc/init.d/cftunnel stop 2>/dev/null
+/etc/init.d/cftunnel disable 2>/dev/null
+exit 0
