@@ -1,0 +1,226 @@
+#!/bin/sh
+# luci-app-cftunnel 后端：Cloudflare API 转发、cloudflared 安装、隧道启停
+# 输出一律为 JSON
+. /usr/share/libubox/jshn.sh
+
+API=https://api.cloudflare.com/client/v4
+BIN=/usr/bin/cloudflared
+LOG=/tmp/cftunnel-install.log
+
+cfg() { uci -q get cftunnel.main.$1; }
+err() { json_init; json_add_boolean success 0; json_add_array errors; json_add_object; json_add_int code 0; json_add_string message "$1"; json_close_object; json_close_array; json_dump; exit 0; }
+sec_of() { echo "t_$1" | tr -c 'A-Za-z0-9_\n' '_'; }
+
+api() {   # api METHOD PATH [BODY]
+	local m="$1" path="$2" body="$3" tok
+	tok="$(cfg api_token)"
+	[ -n "$tok" ] || err "还没有填写 API 令牌"
+	command -v curl >/dev/null || err "缺少 curl，请先安装 curl（apk add curl 或 opkg install curl）"
+	if [ -n "$body" ]; then
+		curl -sS -m 30 -X "$m" -H "Authorization: Bearer $tok" -H "Content-Type: application/json" --data "$body" "$API$path" 2>&1 \
+			|| err "连接 Cloudflare 失败"
+	else
+		curl -sS -m 30 -X "$m" -H "Authorization: Bearer $tok" "$API$path" 2>&1 || err "连接 Cloudflare 失败"
+	fi
+}
+
+arch() {
+	case "$(uname -m)" in
+		aarch64|arm64) echo arm64 ;;
+		x86_64) echo amd64 ;;
+		i?86) echo 386 ;;
+		armv7*|armv6*|arm*) echo arm ;;
+		*) echo "" ;;
+	esac
+}
+
+status() {
+	local s ver inst=0 a p
+	[ -x "$BIN" ] && ver="$("$BIN" --version 2>/dev/null | head -n1)"
+	[ -f /tmp/cftunnel-installing ] && inst=1
+	s="$(ubus call service list '{"name":"cftunnel"}' 2>/dev/null)"
+	json_init
+	json_add_boolean success 1
+	json_add_string version "$ver"
+	json_add_string arch "$(arch)"
+	json_add_boolean installing "$inst"
+	json_add_string install_log "$(tail -n 4 $LOG 2>/dev/null | cut -c1-300)"
+	[ -n "$(cfg api_token)" ] && json_add_boolean has_token 1 || json_add_boolean has_token 0
+	json_add_string account_id "$(cfg account_id)"
+	json_add_string proxy "$(cfg proxy)"
+	json_add_string protocol "$(cfg protocol)"
+	json_add_string ip_version "$(cfg ip_version)"
+	json_add_string autostart "$(cfg autostart)"
+	json_add_string uptime "$(cut -d. -f1 /proc/uptime)"
+	/etc/init.d/cftunnel enabled 2>/dev/null && json_add_boolean boot_enabled 1 || json_add_boolean boot_enabled 0
+	json_add_array tunnels
+	for sec in $(uci -q show cftunnel | sed -n "s/^cftunnel\.\([^.=]*\)=tunnel$/\1/p"); do
+		json_add_object
+		json_add_string sec "$sec"
+		json_add_string id "$(uci -q get cftunnel.$sec.id)"
+		json_add_string name "$(uci -q get cftunnel.$sec.name)"
+		json_add_boolean enabled "$(uci -q get cftunnel.$sec.enabled || echo 0)"
+		a="$(echo "$s" | jsonfilter -e "@.cftunnel.instances['$sec'].running" 2>/dev/null)"
+		[ "$a" = true ] && json_add_boolean running 1 || json_add_boolean running 0
+		p="$(echo "$s" | jsonfilter -e "@.cftunnel.instances['$sec'].pid" 2>/dev/null)"
+		if [ -n "$p" ] && [ -r /proc/$p/stat ]; then
+			json_add_int pid "$p"
+			# 进程启动时刻（开机后的秒数）= stat 第 22 列 / 100
+			json_add_int started "$(( $(cut -d' ' -f22 /proc/$p/stat) / 100 ))"
+		fi
+		json_close_object
+	done
+	json_close_array
+	json_dump
+}
+
+install_bin() {   # 后台下载最新版（插件已自带一份，这里只用于更新）
+	local a
+	a="$(arch)"
+	[ -n "$a" ] || err "不支持的架构 $(uname -m)"
+	[ -f /tmp/cftunnel-installing ] && err "正在下载中"
+	rm -f /tmp/cftunnel-cancel
+	: > $LOG
+	"$0" _dl "$a" >/dev/null 2>&1 </dev/null &
+	echo $! > /tmp/cftunnel-installing
+	json_init; json_add_boolean success 1; json_dump
+}
+
+_dl() {   # 实际下载，由 install_bin 在后台调用
+	local a="$1" px url u ok=0 pid
+	px="$(cfg proxy)"
+	url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$a"
+	local list="$url"
+	[ -n "$px" ] && list="${px%/}/$url $url"
+	for u in $list; do
+		[ -f /tmp/cftunnel-cancel ] && break
+		echo "下载 $u" >> $LOG
+		if command -v curl >/dev/null; then
+			curl -fsSL --connect-timeout 15 --speed-limit 2048 --speed-time 20 -m 900 -o /tmp/cloudflared.new "$u" >> $LOG 2>&1 &
+		else
+			wget -q -T 20 -O /tmp/cloudflared.new "$u" >> $LOG 2>&1 &
+		fi
+		pid=$!; echo $pid > /tmp/cftunnel-curl.pid
+		if wait $pid && [ ! -f /tmp/cftunnel-cancel ] && chmod +x /tmp/cloudflared.new \
+			&& /tmp/cloudflared.new --version >> $LOG 2>&1; then
+			mv /tmp/cloudflared.new "$BIN"; ok=1; break
+		fi
+		rm -f /tmp/cloudflared.new
+		[ -f /tmp/cftunnel-cancel ] || echo "这个地址失败，换下一个" >> $LOG
+	done
+	if [ -f /tmp/cftunnel-cancel ]; then echo "已停止下载" >> $LOG
+	elif [ $ok = 1 ]; then echo "更新完成" >> $LOG; /etc/init.d/cftunnel restart
+	else echo "下载失败，当前版本保持不变" >> $LOG; fi
+	rm -f /tmp/cftunnel-installing /tmp/cftunnel-curl.pid /tmp/cftunnel-cancel /tmp/cloudflared.new
+}
+
+cancel_install() {
+	touch /tmp/cftunnel-cancel
+	[ -f /tmp/cftunnel-curl.pid ] && kill "$(cat /tmp/cftunnel-curl.pid)" 2>/dev/null
+	sleep 1
+	if [ -f /tmp/cftunnel-installing ]; then   # 后台进程没退出就强制清理
+		kill "$(cat /tmp/cftunnel-installing)" 2>/dev/null
+		rm -f /tmp/cftunnel-installing /tmp/cftunnel-curl.pid /tmp/cloudflared.new
+		echo "已停止下载" >> $LOG
+	fi
+	rm -f /tmp/cftunnel-cancel
+	json_init; json_add_boolean success 1; json_dump
+}
+
+setcfg() {   # setcfg key value [key value ...]，只允许这几个键
+	while [ $# -ge 2 ]; do
+		case "$1" in
+			api_token|account_id|proxy|protocol|ip_version|autostart) uci set cftunnel.main.$1="$2" ;;
+		esac
+		shift 2
+	done
+	uci commit cftunnel
+	/etc/init.d/cftunnel restart >/dev/null 2>&1
+	json_init; json_add_boolean success 1; json_dump
+}
+
+save_tunnel() {   # save_tunnel ID NAME TOKEN ENABLED
+	local sec; sec="$(sec_of "$1")"
+	uci set cftunnel.$sec=tunnel
+	uci set cftunnel.$sec.id="$1"
+	uci set cftunnel.$sec.name="$2"
+	[ -n "$3" ] && uci set cftunnel.$sec.token="$3"
+	uci set cftunnel.$sec.enabled="$4"
+	uci commit cftunnel
+	/etc/init.d/cftunnel restart >/dev/null 2>&1
+}
+
+enable() {   # enable ID NAME：经 API 取运行令牌后启动
+	local acc r tok
+	acc="$(cfg account_id)"
+	[ -n "$acc" ] || err "还没有选择账户"
+	r="$(api GET "/accounts/$acc/cfd_tunnel/$1/token")"
+	tok="$(echo "$r" | jsonfilter -e '@.result' 2>/dev/null)"
+	[ -n "$tok" ] || { echo "$r"; exit 0; }
+	save_tunnel "$1" "$2" "$tok" 1
+	json_init; json_add_boolean success 1; json_dump
+}
+
+disable() {   # disable ID
+	local sec; sec="$(sec_of "$1")"
+	uci -q get cftunnel.$sec >/dev/null && { uci set cftunnel.$sec.enabled=0; uci commit cftunnel; /etc/init.d/cftunnel restart >/dev/null 2>&1; }
+	json_init; json_add_boolean success 1; json_dump
+}
+
+save_enable() {   # save_enable ID：重新启用已保存令牌的隧道
+	local sec; sec="$(sec_of "$1")"
+	uci -q get cftunnel.$sec.token >/dev/null || err "没有保存这个隧道的令牌"
+	uci set cftunnel.$sec.enabled=1; uci commit cftunnel; /etc/init.d/cftunnel restart >/dev/null 2>&1
+	json_init; json_add_boolean success 1; json_dump
+}
+
+remove() {   # remove ID：删除本地记录
+	local sec; sec="$(sec_of "$1")"
+	uci -q delete cftunnel.$sec; uci commit cftunnel
+	/etc/init.d/cftunnel restart >/dev/null 2>&1
+	json_init; json_add_boolean success 1; json_dump
+}
+
+add_token() {   # add_token NAME TOKEN [ID]：仅令牌模式，不需要 API（ID 由网页从令牌里解出）
+	local id="$3"
+	echo "$id" | grep -qE '^[A-Za-z0-9-]{8,64}$' || id="$(echo "$2" | base64 -d 2>/dev/null | jsonfilter -e '@.t' 2>/dev/null)"
+	[ -n "$id" ] || id="manual_$(date +%s)"
+	save_tunnel "$id" "$1" "$2" 1
+	json_init; json_add_boolean success 1; json_add_string id "$id"; json_dump
+}
+
+verify() {   # verify TOKEN：只测试，不保存
+	local tok="$1" r z
+	[ -n "$tok" ] || tok="$(cfg api_token)"
+	[ -n "$tok" ] || err "请先填写 API 令牌"
+	command -v curl >/dev/null || err "缺少 curl"
+	r="$(curl -sS -m 20 -H "Authorization: Bearer $tok" "$API/accounts?per_page=50" 2>&1)" || err "连接 Cloudflare 失败：$r"
+	z="$(curl -sS -m 20 -H "Authorization: Bearer $tok" "$API/zones?per_page=50&status=active" 2>/dev/null)"
+	echo "{\"accounts\":$r,\"zones\":${z:-null}}"
+}
+
+logs() {
+	json_init; json_add_boolean success 1
+	json_add_string log "$(logread -e cloudflared 2>/dev/null | tail -n ${1:-100})"
+	json_dump
+}
+
+cmd="$1"; shift
+case "$cmd" in
+	status) status ;;
+	install) install_bin ;;
+	_dl) _dl "$@" ;;
+	cancel) cancel_install ;;
+	api) api "$@" ;;
+	setcfg) setcfg "$@" ;;
+	enable) enable "$@" ;;
+	disable) disable "$@" ;;
+	save_enable) save_enable "$@" ;;
+	remove) remove "$@" ;;
+	add_token) add_token "$@" ;;
+	logs) logs "$@" ;;
+	verify) verify "$@" ;;
+	restart) /etc/init.d/cftunnel restart >/dev/null 2>&1; json_init; json_add_boolean success 1; json_dump ;;
+	stopall) for x in $(uci -q show cftunnel | sed -n "s/^cftunnel\.\([^.=]*\)=tunnel$/\1/p"); do uci set cftunnel.$x.enabled=0; done; uci commit cftunnel; /etc/init.d/cftunnel restart >/dev/null 2>&1; json_init; json_add_boolean success 1; json_dump ;;
+	*) err "未知命令 $cmd" ;;
+esac
