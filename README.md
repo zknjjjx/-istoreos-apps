@@ -4,7 +4,7 @@
 
 | 插件 | 说明 | 下载 |
 |---|---|---|
-| [luci-app-cftunnel](luci-app-cftunnel/) | Cloudflare 隧道：不用公网 IP、不开端口，把内网服务发布到自己的域名。API 令牌一键建隧道、绑定域名、自动 DNS，自带 cloudflared | [packages/](packages/) |
+| [luci-app-cftunnel](luci-app-cftunnel/) | Cloudflare 隧道：不用公网 IP、不开端口，把内网服务发布到自己的域名。API 令牌一键建隧道、绑定域名、自动 DNS，自带 cloudflared | [Releases](../../releases) |
 
 ## 安装
 
@@ -23,5 +23,5 @@
   control/    安装 / 卸载脚本
   build/      打包脚本
   test/       测试
-packages/     编译好的安装包
+.github/      自动打包发布（Actions）
 ```
