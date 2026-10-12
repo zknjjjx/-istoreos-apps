@@ -33,6 +33,7 @@
 - 发布：Actions → luci-app-opsagent → Run workflow，或推送 tag `opsagent-v<版本>`
 
 ## 更新日志
+- **1.0.0-r8**（2026-10-13）docker/容器相关问题只在 NAS 上执行，不再误跑到路由器上触发确认；插件重启后保留对话和待确认命令（存 /tmp）。
 - **1.0.0-r7**（2026-10-12）接入 Cloudflare：新增「Cloudflare」设置页，默认复用 Cloudflare 隧道插件的令牌；AI 可查看/新建隧道主机名和 DNS 记录，修改和删除需确认。
 - **1.0.0-r6**（2026-10-12）接入 GitHub：新增「GitHub」设置页（Fine-grained 令牌）；AI 可查 Actions/Release、触发构建、建仓库，在 NAS 上 git clone/push 自动带凭据（不落盘）；删除类操作需确认。
 - **1.0.0-r5**（2026-10-12）新增 NAS 工具：通过 SSH 让 AI 在 NAS 上长时间开发测试（默认改动免确认，格式化/清盘/删整卷仍需确认）；新增「NAS」设置页；单次最多步数默认 30。
