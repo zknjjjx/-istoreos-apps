@@ -1,0 +1,8 @@
+{
+	"admin/services/opsagent": {
+		"title": "AI 运维助手",
+		"order": 61,
+		"action": { "type": "view", "path": "opsagent" },
+		"depends": { "acl": [ "luci-app-opsagent" ] }
+	}
+}
