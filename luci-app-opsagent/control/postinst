@@ -1,0 +1,8 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+chmod +x /usr/libexec/opsagent /etc/init.d/opsagent /usr/share/opsagent/agent.py
+rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache 2>/dev/null
+/etc/init.d/rpcd reload 2>/dev/null
+/etc/init.d/opsagent enable 2>/dev/null
+/etc/init.d/opsagent restart 2>/dev/null
+exit 0
