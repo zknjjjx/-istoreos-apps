@@ -7,10 +7,10 @@ AI 运维助手（luci-app-opsagent）
 - 只读命令直接执行；会改动系统的命令先在飞书里问「确认」
 - 所有回传给大模型的输出都会抹掉已知密钥/令牌
 """
-import asyncio, inspect, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request, urllib.error, base64
+import asyncio, html as htmlmod, inspect, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r8"
+VERSION = "1.0.0-r9"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -89,7 +89,7 @@ _SECRETS = set()
 
 def collect_secrets():
     s = set()
-    for k in ("app_secret", "api_key", "agh_pass", "github_token", "cf_token"):
+    for k in ("app_secret", "api_key", "agh_pass", "github_token", "cf_token", "tavily_key"):
         if len(CFG.get(k, "")) >= 8:
             s.add(CFG[k])
     try:  # cftunnel 等插件里的令牌
@@ -632,12 +632,140 @@ def run_cf(method, path, body):
     return t
 
 
+# ---------------------------------------------------------------- 联网搜索
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+
+WEB_TOOLS = [{
+    "type": "function",
+    "function": {
+        "name": "web_search",
+        "description": "联网搜索（必应）。用户问天气、新闻、价格、版本号、赛事、政策、某软件怎么配置等实时或你不确定的信息时先搜，再根据结果回答；"
+                       "摘要不够就用 web_fetch 打开一两个最相关的链接读正文。关键词用搜索引擎的写法，必要时带上年份。",
+        "parameters": {"type": "object", "properties": {
+            "query": {"type": "string", "description": "搜索关键词"},
+            "count": {"type": "integer", "description": "返回条数，默认 8，最多 15"}},
+            "required": ["query"]}}}, {
+    "type": "function",
+    "function": {
+        "name": "web_fetch",
+        "description": "打开一个网页（http/https），返回去掉 HTML 后的正文文字（最多约 8000 字）。也可直接读 JSON/文本接口，"
+                       "例如天气：https://wttr.in/上海?format=j1&lang=zh 或 https://wttr.in/上海?lang=zh&format=4。",
+        "parameters": {"type": "object", "properties": {
+            "url": {"type": "string"},
+            "max_chars": {"type": "integer", "description": "最多返回多少字，默认 8000"}},
+            "required": ["url"]}}}]
+
+
+def web_on():
+    return CFG.get("search_enable", "1") == "1"
+
+
+def _strip_html(s):
+    s = re.sub(r"(?is)<(script|style|noscript|svg|head)[^>]*>.*?</\1>", " ", s)
+    s = re.sub(r"(?is)<br\s*/?>|</(p|div|li|h[1-6]|tr|section|article)>", "\n", s)
+    s = re.sub(r"(?s)<[^>]+>", " ", s)
+    s = htmlmod.unescape(s)
+    s = re.sub(r"[ \t\r\f\v\u00a0]+", " ", s)
+    return re.sub(r"\n\s*\n+", "\n", s).strip()
+
+
+def http_text(url, timeout=20, limit=3 * 1024 * 1024):
+    from urllib.parse import quote
+    url = quote(url, safe=":/?&=%#+,;@!$'()*~[]")  # 中文路径/参数
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6",
+                                               "Accept": "text/html,application/json,text/plain,*/*"})
+    with _OPENER.open(req, timeout=timeout) as r:
+        raw = r.read(limit)
+        ctype = r.headers.get("Content-Type", "")
+    m = re.search(r"charset=([\w-]+)", ctype) or re.search(rb'<meta[^>]+charset=["\']?([\w-]+)', raw[:4096])
+    enc = m.group(1) if m else "utf-8"
+    if isinstance(enc, bytes):
+        enc = enc.decode()
+    try:
+        txt = raw.decode(enc, "replace")
+    except LookupError:
+        txt = raw.decode("utf-8", "replace")
+    return txt, ctype
+
+
+def _bing_url(u):
+    u = htmlmod.unescape(u)
+    m = re.search(r"[?&]u=a1([^&]+)", u)
+    if "bing.com/ck/a" in u and m:
+        try:
+            b = m.group(1)
+            return base64.urlsafe_b64decode(b + "=" * (-len(b) % 4)).decode()
+        except Exception:
+            pass
+    return u
+
+
+def parse_bing(h, n=8):
+    out = []
+    for blk in re.split(r'<li class="b_algo"', h)[1:]:
+        m = re.search(r'(?s)<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>', blk)
+        if not m:
+            continue
+        p = re.search(r"(?s)<p[^>]*>(.*?)</p>", blk) or re.search(r'(?s)<div class="b_caption"[^>]*>(.*?)</div>', blk)
+        out.append({"title": _strip_html(m.group(2)), "url": _bing_url(m.group(1)),
+                    "snippet": _strip_html(p.group(1))[:300] if p else ""})
+        if len(out) >= n:
+            break
+    return out
+
+
+def search(query, n=8):
+    n = max(1, min(int(n or 8), 15))
+    if CFG.get("search_engine") == "tavily" and CFG.get("tavily_key"):
+        j = http_json("https://api.tavily.com/search", {"query": query, "max_results": n, "include_answer": True},
+                      {"Authorization": "Bearer " + CFG["tavily_key"]}, timeout=30)
+        if "results" in j:
+            res = [{"title": r.get("title", ""), "url": r.get("url", ""), "snippet": (r.get("content") or "")[:400]} for r in j["results"]]
+            return res, j.get("answer") or ""
+        log("Tavily 失败，改用必应：", str(j)[:200])
+    from urllib.parse import quote
+    h, _ = http_text("https://cn.bing.com/search?q=%s&count=%d&ensearch=0" % (quote(query), n + 2))
+    return parse_bing(h, n), ""
+
+
+def run_search(query, n):
+    try:
+        res, ans = search(query, n)
+    except Exception as e:
+        return "搜索失败：%s" % e
+    if not res:
+        return "没有搜到结果，换个关键词试试。"
+    lines = (["摘要：" + ans] if ans else []) + ["%d. %s\n%s\n%s" % (i + 1, r["title"], r["url"], r["snippet"]) for i, r in enumerate(res)]
+    return redact("\n".join(lines))
+
+
+def run_fetch(url, max_chars):
+    if not re.match(r"^https?://", url or ""):
+        return "只支持 http/https 链接"
+    try:
+        lim = max(500, min(int(max_chars or 8000), 20000))
+    except (TypeError, ValueError):
+        lim = 8000
+    try:
+        txt, ctype = http_text(url)
+    except urllib.error.HTTPError as e:
+        return "打开失败：HTTP %s" % e.code
+    except Exception as e:
+        return "打开失败：%s" % getattr(e, "reason", e)
+    if "html" in ctype or txt.lstrip()[:1] == "<":
+        t = re.search(r"(?is)<title[^>]*>(.*?)</title>", txt)
+        txt = (("标题：" + _strip_html(t.group(1)) + "\n") if t else "") + _strip_html(txt)
+    if len(txt) > lim:
+        txt = txt[:lim] + "\n…（后面还有 %d 字，已截断）" % (len(txt) - lim)
+    return redact(txt)
+
+
 def gh_on():
     return bool(CFG.get("github_token"))
 
 
 def tools():
-    return TOOLS + ([NAS_TOOL] if nas_on() else []) + ([GH_TOOL] if gh_on() else []) + ([CF_TOOL] if cf_on() else [])
+    return TOOLS + ([NAS_TOOL] if nas_on() else []) + ([GH_TOOL] if gh_on() else []) + ([CF_TOOL] if cf_on() else []) + (WEB_TOOLS if web_on() else [])
 
 SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 软路由上，通过飞书和用户（这台设备的主人）对话。
 设备信息：{board}
@@ -652,6 +780,7 @@ SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 
 {nas}
 {gh}
 {cf}
+{web}
 当前时间：{now}"""
 
 
@@ -693,7 +822,7 @@ class Agent:
             log("保存会话失败：", e)
 
     def sys_msg(self):
-        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器（N1）上虽然装了 docker 但不跑用户的容器；用户说的 docker、容器、项目、开发，默认都是指 NAS，用 nas_command，不要同时在路由器上查。只有明确说路由器/N1/AdGuard/DNS/隧道时才用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
+        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器（N1）上虽然装了 docker 但不跑用户的容器；用户说的 docker、容器、项目、开发，默认都是指 NAS，用 nas_command，不要同时在路由器上查。只有明确说路由器/N1/AdGuard/DNS/隧道时才用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), web=("- 你可以联网：web_search 搜索、web_fetch 打开网页。日常问题（翻译、写代码、解释概念等）直接回答；涉及实时信息（天气、新闻、价格、汇率、版本更新、赛事、政策）或你不确定的事实，一定先搜再答，不要凭记忆编，回答末尾附上 1~3 个来源链接。天气直接 web_fetch wttr.in。" if web_on() else "- 你没有联网能力，实时信息（天气、新闻、价格）请说明无法确认。"), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
 
     def trim(self):
         n = cfg_int("history", 30)
@@ -769,6 +898,12 @@ class Agent:
                 desc += "\n" + redact(json.dumps(a.get("body"), ensure_ascii=False))[:1500]
             self.pending = {"cmd": desc, "reason": reason or "修改/删除 Cloudflare 配置", "ts": time.time(), "cf": (method, path, a.get("body"))}
             return "[等待确认] 修改/删除类 Cloudflare 操作已发给用户确认。在用户回复前不要再调用工具，直接简短说明你准备做什么。"
+        if name == "web_search" and web_on():
+            log("搜索：%s" % (a.get("query") or "")[:200])
+            return run_search((a.get("query") or "").strip(), a.get("count"))
+        if name == "web_fetch" and web_on():
+            log("打开网页：%s" % (a.get("url") or "")[:300])
+            return run_fetch((a.get("url") or "").strip(), a.get("max_chars"))
         if name not in ("run_command", "nas_command") or (name == "nas_command" and not nas_on()):
             return "没有这个工具"
         cmd, reason = (a.get("command") or "").strip(), (a.get("reason") or "").strip()
@@ -1089,6 +1224,12 @@ def selftest():
             res["cloudflare"] = ("ok（%s）" % "、".join(z["name"] for z in j["result"])) if j.get("success") else "失败：%s" % (j.get("errors") or j)
         except Exception as e:
             res["cloudflare"] = "失败：%s" % e
+    if web_on():
+        try:
+            r, _ = search("OpenWrt", 3)
+            res["search"] = ("ok（%s，%d 条）" % ("Tavily" if CFG.get("search_engine") == "tavily" and CFG.get("tavily_key") else "必应", len(r))) if r else "失败：没有解析到结果"
+        except Exception as e:
+            res["search"] = "失败：%s" % e
     if nas_on():
         out = run_nas("echo NAS_OK $(hostname)", 20)
         res["nas"] = ("ok（%s）" % out.split("NAS_OK", 1)[1].strip()) if "NAS_OK" in out else "连不上：" + out.replace("退出码: ", "")[:200]
