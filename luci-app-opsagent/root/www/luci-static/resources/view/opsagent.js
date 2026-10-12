@@ -174,6 +174,10 @@ return view.extend({
 		o.placeholder = 'tvly-...';
 		o.depends('search_engine', 'tavily');
 
+		o = s.taboption('adv', form.Flag, 'router_auto', '路由器改动免确认',
+			'勾选后，AI 在路由器上改配置、装/卸软件、重启服务都直接执行，不再问你「确认」。刷机、清盘、格式化仍然一律拒绝，密码/密钥文件仍然不让读。不勾 = 每次改动先在飞书里问你。');
+		o.default = '0';
+
 		o = s.taboption('adv', form.Value, 'confirm_timeout', '确认有效期（秒）',
 			'改动类命令发给你确认后，多久不回复就作废。默认 600 秒（10 分钟）。');
 		o.datatype = 'range(60,3600)';
