@@ -28,7 +28,7 @@ class H(BaseHTTPRequestHandler):
         elif "tenant_access_token" in p:
             r = {"code": 0, "tenant_access_token": "t-x", "expire": 7200}
         elif p.startswith("/open-apis/im/v1/messages"):
-            SENT.append((body["receive_id"], json.loads(body["content"])["text"])); r = {"code": 0}
+            assert ("receive_id_type=chat_id" in p) == body["receive_id"].startswith("oc_"); SENT.append((body["receive_id"].replace("oc_", ""), json.loads(body["content"])["text"])); r = {"code": 0}
         elif p.startswith("/open-apis/contact"):
             r = {"code": 0, "data": {"user": {"name": "赵豆包"}}}
         elif p.endswith("/chat/completions"):
@@ -42,7 +42,7 @@ class H(BaseHTTPRequestHandler):
 
 def ev(i, oid, text):
     e = {"schema": "2.0", "header": {"event_id": "e%d" % i, "event_type": "im.message.receive_v1"},
-         "event": {"sender": {"sender_id": {"open_id": oid}}, "message": {"message_id": "m%d" % i, "chat_type": "p2p", "message_type": "text", "content": json.dumps({"text": text})}}}
+         "event": {"sender": {"sender_id": {"open_id": oid}}, "message": {"message_id": "m%d" % i, "chat_id": "oc_" + oid, "chat_type": "p2p", "message_type": "text", "content": json.dumps({"text": text})}}}
     return A.frame_encode({"SeqID": i, "LogID": i, "service": 9, "method": 1, "headers": [["type", "event"], ["message_id", "x%d" % i], ["sum", "1"], ["seq", "0"], ["trace_id", "t"]], "payload": json.dumps(e).encode()})
 
 ACKS, PINGS = [], []
