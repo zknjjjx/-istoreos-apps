@@ -129,6 +129,14 @@ return view.extend({
 		o.datatype = 'range(4,100)';
 		o.placeholder = '30';
 
+		o = s.taboption('adv', form.Value, 'agh_user', 'AdGuard Home 用户名',
+			'可选。填了以后 AI 能直接查 AdGuard 的拦截统计和查询日志（AdGuard 的接口需要登录）。就是登录 AdGuard 管理页（:3000）用的账号。');
+		o.placeholder = 'admin';
+
+		o = s.taboption('adv', form.Value, 'agh_pass', 'AdGuard Home 密码',
+			'只在路由器本机调用 AdGuard 接口时使用，命令输出发给 AI 前会被抹掉。');
+		o.password = true;
+
 		o = s.taboption('help', form.DummyValue, '_help');
 		o.rawhtml = true;
 		o.cfgvalue = function() {
