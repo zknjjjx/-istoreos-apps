@@ -7,10 +7,10 @@ AI 运维助手（luci-app-opsagent）
 - 只读命令直接执行；会改动系统的命令先在飞书里问「确认」
 - 所有回传给大模型的输出都会抹掉已知密钥/令牌
 """
-import asyncio, inspect, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error, base64
+import asyncio, inspect, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r7"
+VERSION = "1.0.0-r8"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -666,15 +666,34 @@ def llm(messages):
 
 
 # ---------------------------------------------------------------- 对话逻辑
+SESSION_FILE = "/tmp/opsagent.session.json"
+
+
 class Agent:
     def __init__(self):
         self.history = []
         self.pending = None  # {"cmd","reason","ts"}
         self.lock = asyncio.Lock()
         self.board = ""
+        try:  # 插件重启后接着上次的对话和待确认命令
+            with open(SESSION_FILE) as f:
+                j = json.load(f)
+            if time.time() - j.get("ts", 0) < 6 * 3600:
+                self.history, self.pending = j.get("history") or [], j.get("pending")
+        except Exception:
+            pass
+
+    def save(self):
+        try:
+            with open(SESSION_FILE + ".tmp", "w") as f:
+                json.dump({"ts": time.time(), "history": self.history, "pending": self.pending}, f, ensure_ascii=False)
+            os.chmod(SESSION_FILE + ".tmp", 0o600)
+            os.replace(SESSION_FILE + ".tmp", SESSION_FILE)
+        except Exception as e:
+            log("保存会话失败：", e)
 
     def sys_msg(self):
-        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器上的事仍用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
+        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器（N1）上虽然装了 docker 但不跑用户的容器；用户说的 docker、容器、项目、开发，默认都是指 NAS，用 nas_command，不要同时在路由器上查。只有明确说路由器/N1/AdGuard/DNS/隧道时才用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
 
     def trim(self):
         n = cfg_int("history", 30)
@@ -785,6 +804,12 @@ class Agent:
         return "[等待确认] 这条命令会改动系统（%s），已发给用户确认。在用户回复前不要再调用工具，直接简短说明你准备做什么。" % why
 
     def handle(self, text):
+        try:
+            return self._handle(text)
+        finally:
+            self.save()
+
+    def _handle(self, text):
         t = text.strip()
         low = t.lower()
         if low in ("/help", "帮助", "help"):
