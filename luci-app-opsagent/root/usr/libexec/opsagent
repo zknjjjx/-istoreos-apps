@@ -1,0 +1,43 @@
+#!/bin/sh
+# luci-app-opsagent 后端：status | logs [N] | test | restart | unbind
+AGENT=/usr/share/opsagent/agent.py
+cmd="$1"; shift
+json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\n\r'; }
+
+case "$cmd" in
+status)
+	pid=$(pgrep -f "$AGENT" | head -n1)
+	rss=0; up=0
+	if [ -n "$pid" ]; then
+		rss=$(awk '/VmRSS/{print $2}' /proc/$pid/status 2>/dev/null)
+	fi
+	py=0; command -v python3 >/dev/null && py=1
+	ws=0; [ "$py" = 1 ] && python3 -c 'import websockets' 2>/dev/null && ws=1
+	st=$(cat /tmp/opsagent.status 2>/dev/null); [ -n "$st" ] || st='{}'
+	printf '{"running":%s,"pid":"%s","rss_kb":%s,"python":%s,"websockets":%s,"now":%s,"enabled":"%s","owner_open_id":"%s","owner_name":"%s","agent":%s}\n' \
+		"$([ -n "$pid" ] && echo true || echo false)" "$pid" "${rss:-0}" "$py" "$ws" "$(date +%s)" \
+		"$(uci -q get opsagent.main.enabled)" "$(json_str "$(uci -q get opsagent.main.owner_open_id)")" \
+		"$(json_str "$(uci -q get opsagent.main.owner_name)")" "$st"
+	;;
+logs)
+	n=${1:-200}
+	logread -e opsagent 2>/dev/null | tail -n "$n"
+	;;
+test)
+	python3 "$AGENT" --test 2>&1 | tail -n 1
+	;;
+restart)
+	/etc/init.d/opsagent restart >/dev/null 2>&1
+	echo '{"ok":true}'
+	;;
+unbind)
+	uci -q delete opsagent.main.owner_open_id
+	uci -q delete opsagent.main.owner_name
+	uci commit opsagent
+	/etc/init.d/opsagent restart >/dev/null 2>&1
+	echo '{"ok":true}'
+	;;
+*)
+	echo "用法: $0 status|logs [N]|test|restart|unbind" >&2; exit 1
+	;;
+esac
