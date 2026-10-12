@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, inspect, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r6"
+VERSION = "1.0.0-r7"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -89,7 +89,7 @@ _SECRETS = set()
 
 def collect_secrets():
     s = set()
-    for k in ("app_secret", "api_key", "agh_pass", "github_token"):
+    for k in ("app_secret", "api_key", "agh_pass", "github_token", "cf_token"):
         if len(CFG.get(k, "")) >= 8:
             s.add(CFG[k])
     try:  # cftunnel 等插件里的令牌
@@ -569,12 +569,75 @@ def run_gh(method, path, body):
     return t
 
 
+CF_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "cloudflare_api",
+        "description": "调用 Cloudflare API（https://api.cloudflare.com/client/v4），管理用户的隧道（Cloudflare Tunnel）和域名 DNS。"
+                       "常用：GET /zones、GET/POST /zones/{zone_id}/dns_records、GET /accounts/{account_id}/cfd_tunnel?is_deleted=false、"
+                       "GET/PUT /accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations（公网主机名 ingress 规则）。"
+                       "GET 和 POST（新建）直接执行；PUT/PATCH/DELETE（改、删）会先请用户确认。改隧道 ingress 是整体替换：先 GET 现有配置，在原有规则基础上增改，"
+                       "保留末尾的 http_status:404 兜底，绝不能丢掉已有主机名。给新主机名接隧道还要建一条 CNAME 指向 <tunnel_id>.cfargotunnel.com（proxied=true）。",
+        "parameters": {"type": "object", "properties": {
+            "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+            "path": {"type": "string", "description": "以 / 开头的路径，如 /zones?name=example.com"},
+            "body": {"type": "object", "description": "POST/PUT/PATCH 的 JSON 内容"},
+            "reason": {"type": "string", "description": "一句话说明在做什么"}},
+            "required": ["method", "path", "reason"]}}}
+
+
+def _uci1(k):
+    try:
+        return subprocess.run(["uci", "-q", "get", k], capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        return ""
+
+
+def cf_creds():
+    if CFG.get("cf_enable", "1") != "1":
+        return "", ""
+    tok = CFG.get("cf_token") or _uci1("cftunnel.main.api_token")
+    acc = CFG.get("cf_account") or _uci1("cftunnel.main.account_id")
+    return tok, acc
+
+
+def cf_on():
+    return bool(cf_creds()[0])
+
+
+def cf_call(method, path, body=None):
+    if not path.startswith("/"):
+        path = "/" + path
+    tok, acc = cf_creds()
+    path = path.replace("{account_id}", acc)
+    return http_json("https://api.cloudflare.com/client/v4" + path, body if method != "GET" else None,
+                     {"Authorization": "Bearer " + tok}, timeout=30, method=method)
+
+
+def run_cf(method, path, body):
+    try:
+        j = cf_call(method, path, body)
+    except Exception as e:
+        return "请求失败：%s" % e
+    if isinstance(j, dict):
+        for k in ("messages", "result_info"):
+            if not j.get(k):
+                j.pop(k, None)
+        r = j.get("result")
+        if isinstance(r, dict) and "token" in r:
+            r["token"] = "***"
+    t = redact(json.dumps(j, ensure_ascii=False))
+    if len(t) > 8000:
+        t = t[:7800] + "…（已截断，可以加 per_page 或过滤参数）"
+    return t
+
+
 def gh_on():
     return bool(CFG.get("github_token"))
 
 
 def tools():
-    return TOOLS + ([NAS_TOOL] if nas_on() else []) + ([GH_TOOL] if gh_on() else [])
+    return TOOLS + ([NAS_TOOL] if nas_on() else []) + ([GH_TOOL] if gh_on() else []) + ([CF_TOOL] if cf_on() else [])
 
 SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 软路由上，通过飞书和用户（这台设备的主人）对话。
 设备信息：{board}
@@ -588,6 +651,7 @@ SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 
 {agh}
 {nas}
 {gh}
+{cf}
 当前时间：{now}"""
 
 
@@ -610,7 +674,7 @@ class Agent:
         self.board = ""
 
     def sys_msg(self):
-        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器上的事仍用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
+        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器上的事仍用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
 
     def trim(self):
         n = cfg_int("history", 30)
@@ -673,6 +737,19 @@ class Agent:
                 return "已有一条操作在等用户确认，请等用户回复后再提新的。"
             self.pending = {"cmd": "GitHub DELETE " + path, "reason": reason or "删除操作", "ts": time.time(), "gh": (method, path, a.get("body"))}
             return "[等待确认] 删除类 GitHub 操作已发给用户确认。在用户回复前不要再调用工具，直接简短说明你准备做什么。"
+        if name == "cloudflare_api" and cf_on():
+            method = (a.get("method") or "GET").upper()
+            path, reason = (a.get("path") or "").strip(), (a.get("reason") or "").strip()
+            log("Cloudflare %s %s" % (method, path))
+            if method in ("GET", "POST"):
+                return run_cf(method, path, a.get("body"))
+            if self.pending:
+                return "已有一条操作在等用户确认，请等用户回复后再提新的。"
+            desc = "Cloudflare %s %s" % (method, path)
+            if a.get("body"):
+                desc += "\n" + redact(json.dumps(a.get("body"), ensure_ascii=False))[:1500]
+            self.pending = {"cmd": desc, "reason": reason or "修改/删除 Cloudflare 配置", "ts": time.time(), "cf": (method, path, a.get("body"))}
+            return "[等待确认] 修改/删除类 Cloudflare 操作已发给用户确认。在用户回复前不要再调用工具，直接简短说明你准备做什么。"
         if name not in ("run_command", "nas_command") or (name == "nas_command" and not nas_on()):
             return "没有这个工具"
         cmd, reason = (a.get("command") or "").strip(), (a.get("reason") or "").strip()
@@ -723,7 +800,7 @@ class Agent:
             if not expired and low in ("确认", "确定", "执行", "是", "好", "y", "yes", "ok", "同意", "可以"):
                 self.pending = None
                 log("用户确认执行：", p["cmd"])
-                out = run_gh(*p["gh"]) if p.get("gh") else run_nas(p["cmd"], p.get("timeout", 120)) if p.get("nas") else run_shell(p["cmd"], 120)
+                out = run_cf(*p["cf"]) if p.get("cf") else run_gh(*p["gh"]) if p.get("gh") else run_nas(p["cmd"], p.get("timeout", 120)) if p.get("nas") else run_shell(p["cmd"], 120)
                 self.send("✅ 已执行%s：%s\n%s" % ("（NAS）" if p.get("nas") else "", p["cmd"], out[:3000]))
                 return self.think("[系统] 我已确认，命令「%s」执行结果如下，请简要说明结果，需要的话继续：\n%s" % (p["cmd"], out))
             if low in ("取消", "不要", "否", "n", "no", "算了", "别"):
@@ -981,6 +1058,12 @@ def selftest():
             res["github"] = ("ok（%s）" % j["login"]) if j.get("login") else "失败：%s %s" % (j.get("http_status", ""), j.get("message", ""))
         except Exception as e:
             res["github"] = "失败：%s" % e
+    if cf_on():
+        try:
+            j = cf_call("GET", "/zones?per_page=50")
+            res["cloudflare"] = ("ok（%s）" % "、".join(z["name"] for z in j["result"])) if j.get("success") else "失败：%s" % (j.get("errors") or j)
+        except Exception as e:
+            res["cloudflare"] = "失败：%s" % e
     if nas_on():
         out = run_nas("echo NAS_OK $(hostname)", 20)
         res["nas"] = ("ok（%s）" % out.split("NAS_OK", 1)[1].strip()) if "NAS_OK" in out else "连不上：" + out.replace("退出码: ", "")[:200]
