@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, inspect, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r5"
+VERSION = "1.0.0-r6"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -89,7 +89,7 @@ _SECRETS = set()
 
 def collect_secrets():
     s = set()
-    for k in ("app_secret", "api_key", "agh_pass"):
+    for k in ("app_secret", "api_key", "agh_pass", "github_token"):
         if len(CFG.get(k, "")) >= 8:
             s.add(CFG[k])
     try:  # cftunnel 等插件里的令牌
@@ -108,6 +108,8 @@ _RX = [
     (re.compile(r"(--token[ =])\S+"), r"\1***"),
     (re.compile(r"eyJ[A-Za-z0-9_\-]{20,}(\.[A-Za-z0-9_\-]+)*"), "***"),
     (re.compile(r"sk-[A-Za-z0-9]{16,}"), "sk-***"),
+    (re.compile(r"(ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}"), "gh-***"),
+    (re.compile(r"(x-access-token:)[^@\s]+@"), r"\1***@"),
     (re.compile(r"(?i)((?:password|passwd|secret|token|api_key|apikey|psk|key)\s*[=:]\s*['\"]?)[^\s'\"]{6,}"), r"\1***"),
     (re.compile(r"\$2[aby]\$\d+\$[./A-Za-z0-9]{40,}"), "***"),
     (re.compile(r"(?i)(option\s+\S*(?:key|password|secret|token|psk)\S*\s+)'[^']*'"), r"\1'***'"),
@@ -280,7 +282,36 @@ def classify_nas(cmd):
     return ("rw" if k == "deny" else k), why
 
 
+_gh_me = {}
+
+
+def gh_me():
+    if not _gh_me and CFG.get("github_token"):
+        try:
+            j = gh_call("GET", "/user")
+            if j.get("login"):
+                _gh_me.update(login=j["login"], email="%s+%s@users.noreply.github.com" % (j.get("id"), j["login"]))
+        except Exception:
+            pass
+    return _gh_me
+
+
+def nas_prefix():
+    tok = CFG.get("github_token")
+    if not tok:
+        return ""
+    me = gh_me()
+    kv = [("credential.https://github.com.helper", '!f(){ echo username=x-access-token; echo "password=$GH_TOKEN"; }; f')]
+    if me:
+        kv += [("user.name", me["login"]), ("user.email", me["email"])]
+    env = {"GH_TOKEN": tok, "GITHUB_TOKEN": tok, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": str(len(kv))}
+    for i, (k, v) in enumerate(kv):
+        env["GIT_CONFIG_KEY_%d" % i], env["GIT_CONFIG_VALUE_%d" % i] = k, v
+    return "export " + " ".join("%s=%s" % (k, shlex.quote(v)) for k, v in env.items()) + "\n"
+
+
 def run_nas(cmd, timeout):
+    cmd = nas_prefix() + cmd
     argv = ["dbclient", "-y", "-T", "-i", CFG.get("nas_key") or "/etc/opsagent/nas_key",
             "-p", CFG.get("nas_port") or "22", "%s@%s" % (CFG.get("nas_user") or "root", CFG["nas_host"]), cmd]
     return run_shell(argv, timeout, limit=10000)
@@ -493,8 +524,57 @@ NAS_TOOL = {
             "required": ["command", "reason"]}}}
 
 
+GH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "github_api",
+        "description": "调用 GitHub REST API（https://api.github.com），以用户自己的账号身份。可以查仓库、Actions 构建状态和日志摘要、Release、Issue/PR，"
+                       "也可以触发 workflow（POST /repos/{o}/{r}/actions/workflows/{id}/dispatches）、建 Release、建仓库（POST /user/repos）等。"
+                       "GET/POST/PATCH/PUT 直接执行；DELETE（删仓库、删 Release、删分支等）会先请用户确认。推代码请在 NAS 上用 git，不要用这个工具传文件。",
+        "parameters": {"type": "object", "properties": {
+            "method": {"type": "string", "enum": ["GET", "POST", "PATCH", "PUT", "DELETE"]},
+            "path": {"type": "string", "description": "以 / 开头的 API 路径，可带查询参数，如 /repos/OWNER/REPO/actions/runs?per_page=5"},
+            "body": {"type": "object", "description": "POST/PATCH/PUT 的 JSON 内容"},
+            "reason": {"type": "string", "description": "一句话说明在做什么"}},
+            "required": ["method", "path", "reason"]}}}
+
+
+def gh_call(method, path, body=None):
+    if not path.startswith("/"):
+        path = "/" + path
+    return http_json("https://api.github.com" + path, body if method != "GET" else None,
+                     {"Authorization": "Bearer " + CFG.get("github_token", ""), "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "opsagent"}, timeout=30, method=method)
+
+
+def _slim(o, depth=0):
+    """去掉 GitHub 返回里大量无用的 *_url 字段，省 token"""
+    if isinstance(o, dict):
+        return {k: _slim(v, depth + 1) for k, v in o.items()
+                if not (k.endswith("_url") and k not in ("html_url", "browser_download_url", "clone_url")) and k not in ("node_id", "_links")
+                and not (depth > 0 and k in ("owner", "repository", "head_repository", "actor", "triggering_actor", "uploader", "author", "committer", "user"))}
+    if isinstance(o, list):
+        return [_slim(v, depth + 1) for v in o]
+    return o
+
+
+def run_gh(method, path, body):
+    try:
+        j = gh_call(method, path, body)
+    except Exception as e:
+        return "请求失败：%s" % e
+    t = redact(json.dumps(_slim(j), ensure_ascii=False))
+    if len(t) > 8000:
+        t = t[:7800] + "…（已截断，可以加 per_page 或更具体的路径）"
+    return t
+
+
+def gh_on():
+    return bool(CFG.get("github_token"))
+
+
 def tools():
-    return TOOLS + ([NAS_TOOL] if nas_on() else [])
+    return TOOLS + ([NAS_TOOL] if nas_on() else []) + ([GH_TOOL] if gh_on() else [])
 
 SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 软路由上，通过飞书和用户（这台设备的主人）对话。
 设备信息：{board}
@@ -507,6 +587,7 @@ SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 
 - 回答用简体中文，纯文本（不要用 Markdown 表格），简洁，先给结论；数字带单位。
 {agh}
 {nas}
+{gh}
 当前时间：{now}"""
 
 
@@ -529,7 +610,7 @@ class Agent:
         self.board = ""
 
     def sys_msg(self):
-        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器上的事仍用 run_command。" % CFG.get("nas_host") if nas_on() else ""), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
+        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器上的事仍用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
 
     def trim(self):
         n = cfg_int("history", 30)
@@ -582,6 +663,16 @@ class Agent:
         except ValueError:
             return "参数不是合法 JSON"
         name = fn.get("name")
+        if name == "github_api" and gh_on():
+            method = (a.get("method") or "GET").upper()
+            path, reason = (a.get("path") or "").strip(), (a.get("reason") or "").strip()
+            log("GitHub %s %s" % (method, path))
+            if method != "DELETE":
+                return run_gh(method, path, a.get("body"))
+            if self.pending:
+                return "已有一条操作在等用户确认，请等用户回复后再提新的。"
+            self.pending = {"cmd": "GitHub DELETE " + path, "reason": reason or "删除操作", "ts": time.time(), "gh": (method, path, a.get("body"))}
+            return "[等待确认] 删除类 GitHub 操作已发给用户确认。在用户回复前不要再调用工具，直接简短说明你准备做什么。"
         if name not in ("run_command", "nas_command") or (name == "nas_command" and not nas_on()):
             return "没有这个工具"
         cmd, reason = (a.get("command") or "").strip(), (a.get("reason") or "").strip()
@@ -632,7 +723,7 @@ class Agent:
             if not expired and low in ("确认", "确定", "执行", "是", "好", "y", "yes", "ok", "同意", "可以"):
                 self.pending = None
                 log("用户确认执行：", p["cmd"])
-                out = run_nas(p["cmd"], p.get("timeout", 120)) if p.get("nas") else run_shell(p["cmd"], 120)
+                out = run_gh(*p["gh"]) if p.get("gh") else run_nas(p["cmd"], p.get("timeout", 120)) if p.get("nas") else run_shell(p["cmd"], 120)
                 self.send("✅ 已执行%s：%s\n%s" % ("（NAS）" if p.get("nas") else "", p["cmd"], out[:3000]))
                 return self.think("[系统] 我已确认，命令「%s」执行结果如下，请简要说明结果，需要的话继续：\n%s" % (p["cmd"], out))
             if low in ("取消", "不要", "否", "n", "no", "算了", "别"):
@@ -884,6 +975,12 @@ def selftest():
             res["llm"] = "失败：%s %s" % (j.get("http_status", ""), err.get("message") if isinstance(err, dict) else j)
     except Exception as e:
         res["llm"] = "失败：%s" % e
+    if gh_on():
+        try:
+            j = gh_call("GET", "/user")
+            res["github"] = ("ok（%s）" % j["login"]) if j.get("login") else "失败：%s %s" % (j.get("http_status", ""), j.get("message", ""))
+        except Exception as e:
+            res["github"] = "失败：%s" % e
     if nas_on():
         out = run_nas("echo NAS_OK $(hostname)", 20)
         res["nas"] = ("ok（%s）" % out.split("NAS_OK", 1)[1].strip()) if "NAS_OK" in out else "连不上：" + out.replace("退出码: ", "")[:200]
