@@ -84,6 +84,7 @@ return view.extend({
 		s.tab('nas', 'NAS');
 		s.tab('gh', 'GitHub');
 		s.tab('cf', 'Cloudflare');
+		s.tab('web', '联网搜索');
 		s.tab('adv', '高级');
 		s.tab('help', '使用说明');
 
@@ -156,6 +157,23 @@ return view.extend({
 		o = s.taboption('cf', form.Value, 'cf_account', '账户 ID（可留空）',
 			'留空 = 用隧道插件里的账户 ID。');
 
+		o = s.taboption('web', form.Flag, 'search_enable', '启用联网搜索',
+			'让 AI 能上网搜索、打开网页：问天气、新闻、价格、软件版本这类实时信息时，它会先搜再答，并附上来源链接。只读，不会改动任何东西。');
+		o.default = '1';
+
+		o = s.taboption('web', form.ListValue, 'search_engine', '搜索引擎',
+			'<b>必应</b>：免费、不用注册，国内直连（cn.bing.com），一般够用。<br><b>Tavily</b>：专为 AI 设计的搜索接口，结果更干净还带摘要；需在 tavily.com 注册拿 API Key（每月 1000 次免费）。Tavily 出错时会自动退回必应。');
+		o.value('bing', '必应（免费，默认）');
+		o.value('tavily', 'Tavily（需 API Key）');
+		o.default = 'bing';
+		o.depends('search_enable', '1');
+
+		o = s.taboption('web', form.Value, 'tavily_key', 'Tavily API Key',
+			'只有选 Tavily 时才需要。登录 app.tavily.com → API Keys 复制，以 tvly- 开头。');
+		o.password = true;
+		o.placeholder = 'tvly-...';
+		o.depends('search_engine', 'tavily');
+
 		o = s.taboption('adv', form.Value, 'confirm_timeout', '确认有效期（秒）',
 			'改动类命令发给你确认后，多久不回复就作废。默认 600 秒（10 分钟）。');
 		o.datatype = 'range(60,3600)';
@@ -227,7 +245,7 @@ return view.extend({
 							return E('p', {}, [E('b', {}, k + '：'), E('span', { 'style': 'color:' + (ok ? '#2e7d32' : '#c62828') }, v || '—')]);
 						};
 						ui.showModal('测试结果', [
-							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '', j.github ? line('GitHub', j.github) : '', j.cloudflare ? line('Cloudflare', j.cloudflare) : '',
+							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '', j.github ? line('GitHub', j.github) : '', j.cloudflare ? line('Cloudflare', j.cloudflare) : '', j.search ? line('联网搜索', j.search) : '',
 							E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))
 						]);
 					}).catch(function(e) { ui.hideModal(); notify(e.message, 'danger'); });
