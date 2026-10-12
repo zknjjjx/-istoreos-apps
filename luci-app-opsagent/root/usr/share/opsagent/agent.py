@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, inspect, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r3"
+VERSION = "1.0.0-r4"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -89,7 +89,7 @@ _SECRETS = set()
 
 def collect_secrets():
     s = set()
-    for k in ("app_secret", "api_key"):
+    for k in ("app_secret", "api_key", "agh_pass"):
         if len(CFG.get(k, "")) >= 8:
             s.add(CFG[k])
     try:  # cftunnel 等插件里的令牌
@@ -180,6 +180,7 @@ def _seg_readonly(argv):
     if c == "service":
         return (len(args) <= 1), "service 列表"
     if c == "curl":
+        joined = re.sub(r"(-o|--output)\s+/dev/null", "", joined)
         if re.search(r"(^|\s)(-o|-O|--output|-T|--upload-file|-d|--data\S*|-F|--form|-X|--request|-K|--config|--remote-name\S*)\b", joined):
             return False, "curl 写/上传参数"
     if c == "wget":
@@ -198,6 +199,43 @@ def _seg_readonly(argv):
     return True, ""
 
 
+def _segments(cmd):
+    """按 shell 语法切成简单命令；只允许 ; && || | 连接和 >/dev/null、2>&1 这类无害重定向。
+    返回 (段列表, 不安全原因)"""
+    if "`" in cmd or "$(" in cmd or "<(" in cmd or ">(" in cmd:
+        return None, "含子命令"
+    lx = shlex.shlex(cmd, posix=True, punctuation_chars=";&|<>")
+    lx.whitespace_split = True
+    try:
+        toks = list(lx)
+    except ValueError:
+        return None, "无法解析"
+    segs, cur, i = [], [], 0
+    while i < len(toks):
+        t = toks[i]
+        if t in (";", "&&", "||", "|", ";;"):
+            if cur:
+                segs.append(cur)
+            cur = []
+        elif t in (">", ">>", "&>", ">&", ">|", "<", "<<"):
+            nxt = toks[i + 1] if i + 1 < len(toks) else ""
+            if t == "<":
+                pass  # 读文件作输入，参数检查交给敏感路径规则
+            elif not (nxt == "/dev/null" or (t == ">&" and nxt in ("1", "2"))):
+                return None, "重定向写文件"
+            if cur and cur[-1] in ("1", "2"):
+                cur.pop()  # 2>/dev/null 里的 2
+            i += 1
+        elif t == "&" or set(t) <= set(";&|<>"):
+            return None, "后台运行或复杂语法"
+        else:
+            cur.append(t)
+        i += 1
+    if cur:
+        segs.append(cur)
+    return segs, ""
+
+
 def classify(cmd):
     """返回 ('ro'|'rw'|'deny', 说明)"""
     cmd = cmd.strip()
@@ -207,13 +245,12 @@ def classify(cmd):
         return "deny", "高危命令（刷机/清盘/格式化），请自己 SSH 执行"
     if SENSITIVE_PATH.search(cmd) or re.search(r"\buci\s+(show|get|export)\s+(opsagent|cftunnel)\b", cmd):
         return "deny", "涉及密码/密钥文件，不允许读取"
-    if re.search(r"[;&`$<>\n\\(){}]", cmd) or "||" in cmd:
-        return "rw", "含重定向/子命令等复杂语法"
-    for seg in cmd.split("|"):
-        try:
-            argv = shlex.split(seg)
-        except ValueError:
-            return "rw", "无法解析"
+    segs, why = _segments(cmd)
+    if segs is None:
+        return "rw", why
+    if not segs:
+        return "deny", "空命令"
+    for argv in segs:
         ok, why = _seg_readonly(argv)
         if not ok:
             return "rw", why
@@ -222,7 +259,10 @@ def classify(cmd):
 
 def run_shell(cmd, timeout):
     try:
-        p = subprocess.Popen(["/bin/sh", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        env = dict(os.environ)
+        if CFG.get("agh_user") and CFG.get("agh_pass"):
+            env["AGH_AUTH"] = "%s:%s" % (CFG["agh_user"], CFG["agh_pass"])
+        p = subprocess.Popen(["/bin/sh", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
         try:
             out, _ = p.communicate(timeout=timeout)
             rc = p.returncode
@@ -241,14 +281,26 @@ def run_shell(cmd, timeout):
 
 # ---------------------------------------------------------------- HTTP
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-def http_json(url, body=None, headers=None, timeout=30, method=None):
+def _http_json(url, body=None, headers=None, timeout=30, method=None):
     data = json.dumps(body).encode() if body is not None else None
     h = {"Content-Type": "application/json; charset=utf-8"}
     h.update(headers or {})
     req = urllib.request.Request(url, data=data, headers=h, method=method or ("POST" if data else "GET"))
+    for attempt in range(3):
+        try:
+            with _OPENER.open(req, timeout=timeout) as r:
+                return json.loads(r.read().decode() or "{}")
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, OSError) as e:
+            if attempt == 2:
+                raise RuntimeError("网络错误（%s）：%s" % (urlparse(url).hostname, getattr(e, "reason", e)))
+            time.sleep(2 + attempt * 3)
+
+
+def http_json(url, body=None, headers=None, timeout=30, method=None):
     try:
-        with _OPENER.open(req, timeout=timeout) as r:
-            return json.loads(r.read().decode() or "{}")
+        return _http_json(url, body, headers, timeout, method)
     except urllib.error.HTTPError as e:
         txt = e.read().decode("utf-8", "replace")
         try:
@@ -404,6 +456,7 @@ SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 
 - 改动系统前先用只读命令确认现状；改动类命令会自动请用户确认，你不用再问一遍。
 - 不要读取或输出密码、令牌、私钥；输出里的 *** 是已脱敏的内容。
 - 回答用简体中文，纯文本（不要用 Markdown 表格），简洁，先给结论；数字带单位。
+{agh}
 当前时间：{now}"""
 
 
@@ -426,7 +479,7 @@ class Agent:
         self.board = ""
 
     def sys_msg(self):
-        return {"role": "system", "content": SYS_PROMPT.format(board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
+        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
 
     def trim(self):
         n = cfg_int("history", 30)
