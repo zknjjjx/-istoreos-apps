@@ -82,6 +82,7 @@ return view.extend({
 		s.tab('basic', '基本设置');
 		s.tab('ai', '大模型');
 		s.tab('nas', 'NAS');
+		s.tab('gh', 'GitHub');
 		s.tab('adv', '高级');
 		s.tab('help', '使用说明');
 
@@ -135,6 +136,13 @@ return view.extend({
 		o = s.taboption('nas', form.Flag, 'nas_auto', '改动免确认',
 			'开：在 NAS 上装包、改文件、重启容器等直接执行，适合把 NAS 当开发机让 AI 长时间干活。关：和路由器一样，改动要你回复「确认」。无论开关，格式化、清盘、删整个存储卷都会先问你。');
 		o.default = '1';
+
+		o = s.taboption('gh', form.Value, 'github_token', 'GitHub 令牌',
+			'填了就让 AI 用你的 GitHub 账号：查 Actions 构建、发 Release、建仓库，并在 NAS 上 git clone / push（凭据自动带上，不会写进 NAS 的文件）。删除类操作会先问你。<br>' +
+			'创建：GitHub → Settings → Developer settings → Personal access tokens → <b>Fine-grained tokens</b> → Generate new token；Repository access 选 All repositories（或只选要给它的仓库）；' +
+			'Repository permissions 开 <b>Contents、Actions、Workflows、Pull requests、Issues、Administration</b> 为 Read and write（Administration 用来建仓库，不想给可不开）。有效期按你习惯设，过期后在这里换新的。');
+		o.password = true;
+		o.placeholder = 'github_pat_...';
 
 		o = s.taboption('adv', form.Value, 'confirm_timeout', '确认有效期（秒）',
 			'改动类命令发给你确认后，多久不回复就作废。默认 600 秒（10 分钟）。');
@@ -207,7 +215,7 @@ return view.extend({
 							return E('p', {}, [E('b', {}, k + '：'), E('span', { 'style': 'color:' + (ok ? '#2e7d32' : '#c62828') }, v || '—')]);
 						};
 						ui.showModal('测试结果', [
-							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '',
+							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '', j.github ? line('GitHub', j.github) : '',
 							E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))
 						]);
 					}).catch(function(e) { ui.hideModal(); notify(e.message, 'danger'); });
