@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, inspect, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r4"
+VERSION = "1.0.0-r5"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -257,12 +257,41 @@ def classify(cmd):
     return "ro", "只读"
 
 
-def run_shell(cmd, timeout):
+NAS_DANGER = re.compile(r"(\bmkfs|\bwipefs\b|\bfdisk\b|\bsfdisk\b|\bgdisk\b|\bsgdisk\b|\bparted\b|\bblkdiscard\b|\bshred\b"
+                        r"|\bdd\b.*\bof=/dev/|>\s*/dev/(sd|nvme|md|mmcblk|dm-)|\bmdadm\b.*--(create|zero-superblock|stop|remove|fail)"
+                        r"|\bzpool\s+(destroy|create|labelclear)|\bpvremove\b|\bvgremove\b|\blvremove\b|\bcryptsetup\s+luksFormat"
+                        r"|\brm\s+-[a-z]*r[a-z]*\s+(--no-preserve-root\s+)?/(\s|$|\*)|\brm\s+-[a-z]*r[a-z]*\s+/vol\d+/?(\s|$|\*)|:\(\)\s*\{)")
+
+
+def nas_on():
+    return bool(CFG.get("nas_host"))
+
+
+def classify_nas(cmd):
+    """NAS：格式化/清盘类需要确认；其余按设置决定"""
+    cmd = cmd.strip()
+    if not cmd:
+        return "deny", "空命令"
+    if NAS_DANGER.search(cmd):
+        return "danger", "格式化/清盘/删整卷"
+    if CFG.get("nas_auto", "1") == "1":
+        return "ro", "NAS 改动免确认"
+    k, why = classify(cmd)
+    return ("rw" if k == "deny" else k), why
+
+
+def run_nas(cmd, timeout):
+    argv = ["dbclient", "-y", "-T", "-i", CFG.get("nas_key") or "/etc/opsagent/nas_key",
+            "-p", CFG.get("nas_port") or "22", "%s@%s" % (CFG.get("nas_user") or "root", CFG["nas_host"]), cmd]
+    return run_shell(argv, timeout, limit=10000)
+
+
+def run_shell(cmd, timeout, limit=6000):
     try:
         env = dict(os.environ)
         if CFG.get("agh_user") and CFG.get("agh_pass"):
             env["AGH_AUTH"] = "%s:%s" % (CFG["agh_user"], CFG["agh_pass"])
-        p = subprocess.Popen(["/bin/sh", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
+        p = subprocess.Popen(cmd if isinstance(cmd, list) else ["/bin/sh", "-c", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
         try:
             out, _ = p.communicate(timeout=timeout)
             rc = p.returncode
@@ -274,8 +303,10 @@ def run_shell(cmd, timeout):
     except Exception as e:
         t, rc = str(e), "执行失败"
     t = redact(t)
-    if len(t) > 6000:
-        t = t[:2500] + "\n…（中间省略 %d 字）…\n" % (len(t) - 5000) + t[-2500:]
+    t = re.sub(r"\n?dbclient: Connection to \S+ exited: Interrupted\.\n?", "", t)
+    if len(t) > limit:
+        h = limit * 2 // 5
+        t = t[:h] + "\n…（中间省略 %d 字）…\n" % (len(t) - 2 * h) + t[-h:]
     return "退出码: %s\n%s" % (rc, t or "（无输出）")
 
 
@@ -447,6 +478,24 @@ TOOLS = [{
             "reason": {"type": "string", "description": "一句话说明为什么执行它（会展示给用户）"}},
             "required": ["command", "reason"]}}}]
 
+NAS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "nas_command",
+        "description": "通过 SSH 在用户的 NAS（飞牛 fnOS，Debian 12，bash，root 权限）上执行一条命令。NAS 是用户开发和测试应用的机器，"
+                       "你可以直接装包、写文件、改配置、跑 docker/git/编译，不用问用户；只有格式化、清盘、删整个存储卷这类会先请用户确认。"
+                       "命令非交互（apt 加 -y，git 不要弹编辑器）。耗时长的（编译、拉镜像）设大 timeout_sec；超过 30 分钟的任务用 nohup … > 日志 2>&1 & 放后台，之后再查日志。"
+                       "写多行文件用 cat > 文件 <<'EOF' … EOF。",
+        "parameters": {"type": "object", "properties": {
+            "command": {"type": "string", "description": "要执行的完整命令（可以是多行脚本）"},
+            "reason": {"type": "string", "description": "一句话说明在做什么（会展示给用户）"},
+            "timeout_sec": {"type": "integer", "description": "超时秒数，默认 120，最大 1800"}},
+            "required": ["command", "reason"]}}}
+
+
+def tools():
+    return TOOLS + ([NAS_TOOL] if nas_on() else [])
+
 SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 软路由上，通过飞书和用户（这台设备的主人）对话。
 设备信息：{board}
 网络环境：N1 是旁路由，局域网 IP 192.168.2.254；主路由 TP-Link 192.168.2.1 负责拨号、网关和 DHCP。
@@ -457,12 +506,13 @@ SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 
 - 不要读取或输出密码、令牌、私钥；输出里的 *** 是已脱敏的内容。
 - 回答用简体中文，纯文本（不要用 Markdown 表格），简洁，先给结论；数字带单位。
 {agh}
+{nas}
 当前时间：{now}"""
 
 
 def llm(messages):
     url = CFG.get("base_url", "https://api.deepseek.com").rstrip("/") + "/chat/completions"
-    j = http_json(url, {"model": CFG.get("model") or "deepseek-flash", "messages": messages, "tools": TOOLS, "temperature": 0.2},
+    j = http_json(url, {"model": CFG.get("model") or "deepseek-flash", "messages": messages, "tools": tools(), "temperature": 0.2},
                   {"Authorization": "Bearer " + CFG.get("api_key", "")}, timeout=120)
     if "choices" not in j:
         err = j.get("error", {})
@@ -479,7 +529,7 @@ class Agent:
         self.board = ""
 
     def sys_msg(self):
-        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
+        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器上的事仍用 run_command。" % CFG.get("nas_host") if nas_on() else ""), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
 
     def trim(self):
         n = cfg_int("history", 30)
@@ -495,7 +545,7 @@ class Agent:
         """同步：跑一轮工具循环，返回给用户的文本"""
         self.history.append({"role": "user", "content": user_text})
         self.trim()
-        for _ in range(cfg_int("max_steps", 8)):
+        for _ in range(cfg_int("max_steps", 30)):
             msg = llm([self.sys_msg()] + self.history)
             calls = msg.get("tool_calls") or []
             keep = {"role": "assistant", "content": msg.get("content") or ""}
@@ -519,7 +569,7 @@ class Agent:
                 p = self.pending
                 pre = (msg.get("content") or "").strip()
                 return ((pre + "\n\n") if pre else "") + \
-                    "⚠️ 需要你确认才会执行：\n%s\n\n原因：%s\n\n回复「确认」执行，回复「取消」放弃（%d 分钟内有效）。" % (
+                    "⚠️ 需要你确认才会执行" + ("（NAS）" if p.get("nas") else "") + "：\n%s\n\n原因：%s\n\n回复「确认」执行，回复「取消」放弃（%d 分钟内有效）。" % (
                         p["cmd"], p["reason"], cfg_int("confirm_timeout", 600) // 60)
         for m in self.history:
             m.pop("reasoning_content", None)
@@ -531,9 +581,30 @@ class Agent:
             a = json.loads(fn.get("arguments") or "{}")
         except ValueError:
             return "参数不是合法 JSON"
-        if fn.get("name") != "run_command":
+        name = fn.get("name")
+        if name not in ("run_command", "nas_command") or (name == "nas_command" and not nas_on()):
             return "没有这个工具"
         cmd, reason = (a.get("command") or "").strip(), (a.get("reason") or "").strip()
+        if name == "nas_command":
+            kind, why = classify_nas(cmd)
+            try:
+                to = max(10, min(int(a.get("timeout_sec") or 120), 1800))
+            except (TypeError, ValueError):
+                to = 120
+            log("NAS 工具调用 [%s] %s" % (kind, cmd[:500]))
+            if kind == "deny":
+                return "已拒绝：" + why
+            if kind == "ro":
+                if to > 60:
+                    try:
+                        self.send("⏳ NAS 执行中（最长 %d 分钟）：%s" % ((to + 59) // 60, reason or cmd[:200]))
+                    except Exception:
+                        pass
+                return run_nas(cmd, to)
+            if self.pending:
+                return "已有一条命令在等用户确认，请等用户回复后再提新的。"
+            self.pending = {"cmd": cmd, "reason": reason or why, "ts": time.time(), "nas": True, "timeout": to}
+            return "[等待确认] 这条 NAS 命令属于%s，已发给用户确认。在用户回复前不要再调用工具，直接简短说明你准备做什么。" % why
         kind, why = classify(cmd)
         log("工具调用 [%s] %s" % (kind, cmd))
         if kind == "deny":
@@ -561,8 +632,8 @@ class Agent:
             if not expired and low in ("确认", "确定", "执行", "是", "好", "y", "yes", "ok", "同意", "可以"):
                 self.pending = None
                 log("用户确认执行：", p["cmd"])
-                out = run_shell(p["cmd"], 120)
-                self.send("✅ 已执行：%s\n%s" % (p["cmd"], out[:3000]))
+                out = run_nas(p["cmd"], p.get("timeout", 120)) if p.get("nas") else run_shell(p["cmd"], 120)
+                self.send("✅ 已执行%s：%s\n%s" % ("（NAS）" if p.get("nas") else "", p["cmd"], out[:3000]))
                 return self.think("[系统] 我已确认，命令「%s」执行结果如下，请简要说明结果，需要的话继续：\n%s" % (p["cmd"], out))
             if low in ("取消", "不要", "否", "n", "no", "算了", "别"):
                 self.pending = None
@@ -614,11 +685,12 @@ HELP = """我是 N1 运维助手，直接用大白话问我就行，比如：
 · AdGuard 今天拦截了多少
 · 看看 cloudflared 最近的日志有没有报错
 · 重启一下 AdGuard Home（会先问你确认）
+· 在 NAS 上用 docker 跑一个 xxx 并告诉我访问地址（设置了 NAS 才有）
 快捷指令：
 · 状态 —— 直接看负载/内存/磁盘/温度（不走 AI）
 · 新对话 —— 清空上下文
 · 帮助 —— 显示这段话
-安全规则：只读命令直接执行；会改动系统的命令先发给你，回复「确认」才执行；刷机、清盘之类高危命令一律拒绝。"""
+安全规则：只读命令直接执行；会改动系统的命令先发给你，回复「确认」才执行；刷机、清盘之类高危命令一律拒绝。NAS 上默认改动直接做，格式化/清盘先问你。"""
 
 
 # ---------------------------------------------------------------- 长连接主循环
@@ -812,6 +884,9 @@ def selftest():
             res["llm"] = "失败：%s %s" % (j.get("http_status", ""), err.get("message") if isinstance(err, dict) else j)
     except Exception as e:
         res["llm"] = "失败：%s" % e
+    if nas_on():
+        out = run_nas("echo NAS_OK $(hostname)", 20)
+        res["nas"] = ("ok（%s）" % out.split("NAS_OK", 1)[1].strip()) if "NAS_OK" in out else "连不上：" + out.replace("退出码: ", "")[:200]
     print(json.dumps(res, ensure_ascii=False))
 
 
