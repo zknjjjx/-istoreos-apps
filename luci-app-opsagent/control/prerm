@@ -1,0 +1,5 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+/etc/init.d/opsagent stop 2>/dev/null
+/etc/init.d/opsagent disable 2>/dev/null
+exit 0
