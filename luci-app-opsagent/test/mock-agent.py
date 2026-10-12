@@ -12,7 +12,7 @@ SENT, LLM_CALLS = [], []
 SCRIPT = [
     {"tool_calls": [{"id": "c1", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"command": "uptime", "reason": "看负载"})}}]},
     {"content": "负载很低。"},
-    {"tool_calls": [{"id": "c2", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"command": "echo restarted > /dev/null; echo RESTART_OK", "reason": "重启服务"})}}]},
+    {"tool_calls": [{"id": "c2", "type": "function", "function": {"name": "run_command", "arguments": json.dumps({"command": "echo RESTART_OK > /tmp/opsagent-mock.txt; cat /tmp/opsagent-mock.txt", "reason": "重启服务"})}}]},
     {"content": "已重启完成。"},
 ]
 
