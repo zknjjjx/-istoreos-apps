@@ -83,6 +83,7 @@ return view.extend({
 		s.tab('ai', '大模型');
 		s.tab('nas', 'NAS');
 		s.tab('gh', 'GitHub');
+		s.tab('cf', 'Cloudflare');
 		s.tab('adv', '高级');
 		s.tab('help', '使用说明');
 
@@ -143,6 +144,17 @@ return view.extend({
 			'Repository permissions 开 <b>Contents、Actions、Workflows、Pull requests、Issues、Administration</b> 为 Read and write（Administration 用来建仓库，不想给可不开）。有效期按你习惯设，过期后在这里换新的。');
 		o.password = true;
 		o.placeholder = 'github_pat_...';
+
+		o = s.taboption('cf', form.Flag, 'cf_enable', '启用 Cloudflare 工具',
+			'让 AI 管理你的 Cloudflare 隧道和域名 DNS（查看、新建直接做；修改、删除先问你）。');
+		o.default = '1';
+
+		o = s.taboption('cf', form.Value, 'cf_token', 'API 令牌（可留空）',
+			'留空 = 直接用「Cloudflare 隧道」插件里已保存的令牌和账户，不用重复填。想单独给 AI 一个权限更小的令牌就填这里，需要：账户·Cloudflare Tunnel·编辑、区域·DNS·编辑、区域·区域·读取。');
+		o.password = true;
+
+		o = s.taboption('cf', form.Value, 'cf_account', '账户 ID（可留空）',
+			'留空 = 用隧道插件里的账户 ID。');
 
 		o = s.taboption('adv', form.Value, 'confirm_timeout', '确认有效期（秒）',
 			'改动类命令发给你确认后，多久不回复就作废。默认 600 秒（10 分钟）。');
@@ -215,7 +227,7 @@ return view.extend({
 							return E('p', {}, [E('b', {}, k + '：'), E('span', { 'style': 'color:' + (ok ? '#2e7d32' : '#c62828') }, v || '—')]);
 						};
 						ui.showModal('测试结果', [
-							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '', j.github ? line('GitHub', j.github) : '',
+							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '', j.github ? line('GitHub', j.github) : '', j.cloudflare ? line('Cloudflare', j.cloudflare) : '',
 							E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))
 						]);
 					}).catch(function(e) { ui.hideModal(); notify(e.message, 'danger'); });
