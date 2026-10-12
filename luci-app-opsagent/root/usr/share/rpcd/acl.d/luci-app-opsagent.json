@@ -1,0 +1,19 @@
+{
+	"luci-app-opsagent": {
+		"description": "AI ops agent (Feishu bot)",
+		"read": {
+			"file": {
+				"/usr/libexec/opsagent status": [ "exec" ],
+				"/usr/libexec/opsagent logs *": [ "exec" ]
+			},
+			"uci": [ "opsagent" ]
+		},
+		"write": {
+			"file": {
+				"/usr/libexec/opsagent": [ "exec" ],
+				"/usr/libexec/opsagent *": [ "exec" ]
+			},
+			"uci": [ "opsagent" ]
+		}
+	}
+}
