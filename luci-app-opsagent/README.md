@@ -1,0 +1,36 @@
+# luci-app-opsagent · AI 运维助手
+
+在**飞书**里用大白话管理 iStoreOS / OpenWrt 路由器：查负载、看日志、重启服务……
+大脑用 **DeepSeek**（任何 OpenAI 兼容接口都行），飞书走**长连接**，路由器不需要公网 IP、不用开端口。
+
+- 纯 Python 脚本，所有架构通用（`-all.apk`），常驻内存约 30 MB
+- 依赖 `python3`、`python3-websockets`（安装时自动从软件源拉取，约 20 MB）
+- 适用于 OpenWrt 25.12+ / 新版 iStoreOS（apk 包管理器）
+
+## 安全规则
+| 情况 | 处理 |
+|---|---|
+| 只读命令（uptime、logread、uci show、ping -c…） | 直接执行 |
+| 会改动系统的命令（重启服务、改配置、装包…） | 先发到飞书，你回复「确认」才执行，10 分钟过期 |
+| 刷机、清盘、格式化（mtd、firstboot、dd of=/dev/…） | 一律拒绝 |
+| 读取 /etc/shadow、私钥、cftunnel/opsagent 配置等 | 一律拒绝 |
+| 陌生人给机器人发消息 | 拒绝，只听第一个绑定的主人 |
+
+所有命令输出在发给 AI 之前，会抹掉 uci 里的密码/令牌、`--token`、`sk-…`、JWT 等敏感字符串。
+
+## 安装与配置
+1. 飞书开放平台建「企业自建应用」，添加**机器人**，开通权限 `im:message.p2p_msg:readonly`、`im:message:send_as_bot`、`im:message`，发布版本。
+2. 从 [Releases](https://github.com/zknjjjx/istoreos-apps/releases) 下载 `luci-app-opsagent-*-all.apk`，iStore → 手动安装。
+3. LuCI → 服务 → **AI 运维助手**：填 App ID、App Secret、DeepSeek API Key，勾选启用，保存并应用；点「测试连接」。
+4. 飞书开放平台 → 事件与回调 → 订阅方式选**使用长连接接收事件**（路由器在线才能保存）→ 添加事件**接收消息 im.message.receive_v1** → 再发布一个版本。
+5. 飞书里找到机器人发「你好」，第一个发消息的人被绑定为主人。
+
+飞书快捷指令：`状态`、`新对话`、`帮助`。
+
+## 开发
+- 本地端到端模拟（假飞书 + 假大模型）：`pip install websockets && OPSAGENT_NOSYSLOG=1 python3 test/mock-agent.py`
+- 打包：`sh build/build-apk.sh 1.0.0-r1` → `dist/`
+- 发布：Actions → luci-app-opsagent → Run workflow，或推送 tag `opsagent-v<版本>`
+
+## 更新日志
+- **1.0.0-r1**（2026-10-12）首个版本：飞书长连接、DeepSeek 工具调用、只读/确认/拒绝三级命令、主人绑定、脱敏、LuCI 设置页和日志。
