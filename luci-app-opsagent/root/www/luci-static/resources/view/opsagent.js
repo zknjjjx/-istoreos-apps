@@ -81,6 +81,7 @@ return view.extend({
 		var s = m.section(form.NamedSection, 'main', 'opsagent');
 		s.tab('basic', '基本设置');
 		s.tab('ai', '大模型');
+		s.tab('nas', 'NAS');
 		s.tab('adv', '高级');
 		s.tab('help', '使用说明');
 
@@ -114,15 +115,36 @@ return view.extend({
 		o.placeholder = 'https://api.deepseek.com';
 		o.default = 'https://api.deepseek.com';
 
+		o = s.taboption('nas', form.Value, 'nas_host', 'NAS 地址',
+			'填了就启用 NAS 工具：AI 会通过 SSH 登录这台 NAS 执行命令（装环境、写代码、构建、跑 docker 等）。留空则不连 NAS。例：192.168.2.234');
+		o.datatype = 'host';
+		o.placeholder = '192.168.2.234';
+
+		o = s.taboption('nas', form.Value, 'nas_user', 'SSH 用户',
+			'登录 NAS 用的用户。用 root 才能装软件、管 docker；只想让它在自己目录里折腾就建个普通用户。');
+		o.placeholder = 'root';
+
+		o = s.taboption('nas', form.Value, 'nas_port', 'SSH 端口', 'NAS 的 SSH 端口，飞牛默认 22。');
+		o.datatype = 'port';
+		o.placeholder = '22';
+
+		o = s.taboption('nas', form.Value, 'nas_key', '私钥文件',
+			'路由器上的 SSH 私钥（dropbear 格式）。没有的话在路由器上执行 <code>dropbearkey -t ed25519 -f /etc/opsagent/nas_key</code> 生成，再把输出的公钥那行加到 NAS 对应用户的 <code>~/.ssh/authorized_keys</code>。');
+		o.placeholder = '/etc/opsagent/nas_key';
+
+		o = s.taboption('nas', form.Flag, 'nas_auto', '改动免确认',
+			'开：在 NAS 上装包、改文件、重启容器等直接执行，适合把 NAS 当开发机让 AI 长时间干活。关：和路由器一样，改动要你回复「确认」。无论开关，格式化、清盘、删整个存储卷都会先问你。');
+		o.default = '1';
+
 		o = s.taboption('adv', form.Value, 'confirm_timeout', '确认有效期（秒）',
 			'改动类命令发给你确认后，多久不回复就作废。默认 600 秒（10 分钟）。');
 		o.datatype = 'range(60,3600)';
 		o.placeholder = '600';
 
 		o = s.taboption('adv', form.Value, 'max_steps', '单次最多执行步数',
-			'AI 回答一个问题时最多连续执行几条命令，防止它绕圈子费钱。默认 8。');
-		o.datatype = 'range(1,20)';
-		o.placeholder = '8';
+			'AI 回答一个问题时最多连续执行几条命令，到了就停下等你说「继续」。查问题 8 步就够；让它在 NAS 上做开发建议 30 以上。默认 30。');
+		o.datatype = 'range(1,100)';
+		o.placeholder = '30';
 
 		o = s.taboption('adv', form.Value, 'history', '记住的对话条数',
 			'AI 能记住最近多少条消息（含命令输出）。越多越懂上下文，但每次花的 token 越多。默认 30；在飞书里发「新对话」可随时清空。');
@@ -185,7 +207,7 @@ return view.extend({
 							return E('p', {}, [E('b', {}, k + '：'), E('span', { 'style': 'color:' + (ok ? '#2e7d32' : '#c62828') }, v || '—')]);
 						};
 						ui.showModal('测试结果', [
-							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets),
+							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '',
 							E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))
 						]);
 					}).catch(function(e) { ui.hideModal(); notify(e.message, 'danger'); });
