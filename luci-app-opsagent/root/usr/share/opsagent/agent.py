@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, inspect, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r2"
+VERSION = "1.0.0-r3"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -501,7 +501,7 @@ class Agent:
             self.history, self.pending = [], None
             return "好的，已清空对话记录。"
         if low in ("/status", "状态"):
-            return run_shell("uptime; free -m | head -2; df -h /overlay | tail -1; cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null", 15)
+            return quick_status()
         if self.pending:
             p = self.pending
             expired = time.time() - p["ts"] > cfg_int("confirm_timeout", 600)
@@ -520,6 +520,40 @@ class Agent:
             else:
                 t = "[系统] 我没有确认上一条命令「%s」，它已作废。\n%s" % (p["cmd"], t)
         return self.think(t)
+
+
+def quick_status():
+    def rd(p):
+        try:
+            with open(p) as f:
+                return f.read()
+        except OSError:
+            return ""
+    out = []
+    up = float((rd("/proc/uptime").split() or ["0"])[0])
+    d, h, m = int(up // 86400), int(up % 86400 // 3600), int(up % 3600 // 60)
+    out.append("⏱ 已运行 %s%d 小时 %d 分" % (("%d 天 " % d) if d else "", h, m))
+    la = rd("/proc/loadavg").split()
+    if la:
+        out.append("📈 负载 %s / %s / %s（1/5/15 分钟，4 核）" % tuple(la[:3]))
+    mi = {}
+    for line in rd("/proc/meminfo").splitlines():
+        k, _, v = line.partition(":")
+        mi[k] = int((v.split() or ["0"])[0])
+    if mi.get("MemTotal"):
+        tot, av = mi["MemTotal"] // 1024, mi.get("MemAvailable", 0) // 1024
+        out.append("🧠 内存 已用 %d MB / 共 %d MB，可用 %d MB（%d%%）" % (tot - av, tot, av, av * 100 // tot))
+    try:
+        st = os.statvfs("/overlay")
+        tot, fr = st.f_blocks * st.f_frsize, st.f_bavail * st.f_frsize
+        out.append("💾 存储 已用 %.1f GB / 共 %.1f GB，剩 %.1f GB" % ((tot - fr) / 1e9, tot / 1e9, fr / 1e9))
+    except OSError:
+        pass
+    t = rd("/sys/class/thermal/thermal_zone0/temp").strip()
+    if t.isdigit():
+        c = int(t) / 1000
+        out.append("🌡 CPU 温度 %.1f °C%s" % (c, "（偏高）" if c >= 70 else ""))
+    return "\n".join(out) or "读不到系统状态"
 
 
 HELP = """我是 N1 运维助手，直接用大白话问我就行，比如：
