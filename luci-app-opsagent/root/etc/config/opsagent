@@ -1,0 +1,13 @@
+
+config opsagent 'main'
+	option enabled '0'
+	option app_id ''
+	option app_secret ''
+	option api_key ''
+	option base_url 'https://api.deepseek.com'
+	option model 'deepseek-flash'
+	option owner_open_id ''
+	option owner_name ''
+	option confirm_timeout '600'
+	option max_steps '8'
+	option history '30'
