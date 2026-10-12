@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, html as htmlmod, inspect, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r9"
+VERSION = "1.0.0-r10"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -773,7 +773,7 @@ SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 
 本机服务：dnsmasq（53 端口，上游转发给 AdGuard Home 127.0.0.1:5335，管理页 :3000）、Cloudflare 隧道（cftunnel/cloudflared）、dropbear SSH、LuCI。系统是 iStoreOS（OpenWrt 25.12，包管理器 apk，配置用 uci）。
 工作方式：
 - 需要了解情况就调用 run_command，先查再下结论，不要编造输出。能一条命令查清的不要分多次。
-- 改动系统前先用只读命令确认现状；改动类命令会自动请用户确认，你不用再问一遍。
+- 改动系统前先用只读命令确认现状。{router}
 - 不要读取或输出密码、令牌、私钥；输出里的 *** 是已脱敏的内容。
 - 回答用简体中文，纯文本（不要用 Markdown 表格），简洁，先给结论；数字带单位。
 {agh}
@@ -822,7 +822,7 @@ class Agent:
             log("保存会话失败：", e)
 
     def sys_msg(self):
-        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器（N1）上虽然装了 docker 但不跑用户的容器；用户说的 docker、容器、项目、开发，默认都是指 NAS，用 nas_command，不要同时在路由器上查。只有明确说路由器/N1/AdGuard/DNS/隧道时才用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), web=("- 你可以联网：web_search 搜索、web_fetch 打开网页。日常问题（翻译、写代码、解释概念等）直接回答；涉及实时信息（天气、新闻、价格、汇率、版本更新、赛事、政策）或你不确定的事实，一定先搜再答，不要凭记忆编，回答末尾附上 1~3 个来源链接。天气直接 web_fetch wttr.in。" if web_on() else "- 你没有联网能力，实时信息（天气、新闻、价格）请说明无法确认。"), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
+        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器（N1）上虽然装了 docker 但不跑用户的容器；用户说的 docker、容器、项目、开发，默认都是指 NAS，用 nas_command，不要同时在路由器上查。只有明确说路由器/N1/AdGuard/DNS/隧道时才用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), router=("用户已允许你在路由器上直接改配置、装/卸软件、重启服务，不用确认；但动手前想清楚影响，别断掉自己的网络（dnsmasq/AdGuard/隧道 n1/防火墙/网络接口），改 uci 前先备份原值，改完验证并汇报改了什么。" if CFG.get("router_auto", "0") == "1" else "改动类命令会自动请用户确认，你不用再问一遍。"), web=("- 你可以联网：web_search 搜索、web_fetch 打开网页。日常问题（翻译、写代码、解释概念等）直接回答；涉及实时信息（天气、新闻、价格、汇率、版本更新、赛事、政策）或你不确定的事实，一定先搜再答，不要凭记忆编，回答末尾附上 1~3 个来源链接。天气直接 web_fetch wttr.in。" if web_on() else "- 你没有联网能力，实时信息（天气、新闻、价格）请说明无法确认。"), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
 
     def trim(self):
         n = cfg_int("history", 30)
@@ -933,6 +933,9 @@ class Agent:
             return "已拒绝：" + why
         if kind == "ro":
             return run_shell(cmd, 30)
+        if CFG.get("router_auto", "0") == "1":
+            log("路由器改动免确认，直接执行（%s）" % why)
+            return run_shell(cmd, 300)
         if self.pending:
             return "已有一条命令在等用户确认，请等用户回复后再提新的改动。"
         self.pending = {"cmd": cmd, "reason": reason or why, "ts": time.time()}
