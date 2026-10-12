@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, inspect, json, os, re, shlex, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0"
+VERSION = "1.0.0-r2"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -274,12 +274,14 @@ def feishu_token():
     return _tok["v"]
 
 
-def feishu_send(open_id, text):
+def feishu_send(target, text):
+    """target 以 oc_ 开头按会话 chat_id 发（私聊必须这样，否则飞书报 230101），否则按 open_id"""
+    rid = "chat_id" if target.startswith("oc_") else "open_id"
     text = text.strip() or "（空）"
     parts = [text[i:i + 3800] for i in range(0, len(text), 3800)][:4]
     for p in parts:
-        j = http_json(FEISHU + "/open-apis/im/v1/messages?receive_id_type=open_id",
-                      {"receive_id": open_id, "msg_type": "text", "content": json.dumps({"text": p}, ensure_ascii=False)},
+        j = http_json(FEISHU + "/open-apis/im/v1/messages?receive_id_type=" + rid,
+                      {"receive_id": target, "msg_type": "text", "content": json.dumps({"text": p}, ensure_ascii=False)},
                       {"Authorization": "Bearer " + feishu_token()})
         if j.get("code") != 0:
             log("发送飞书消息失败:", j.get("code"), j.get("msg"))
@@ -434,7 +436,7 @@ class Agent:
         self.history = h
 
     def send(self, text):
-        feishu_send(CFG["owner_open_id"], text)
+        feishu_send(CFG.get("owner_chat_id") or CFG["owner_open_id"], text)
 
     def think(self, user_text):
         """同步：跑一轮工具循环，返回给用户的文本"""
@@ -649,6 +651,7 @@ class Bot:
         sender = e.get("sender", {}).get("sender_id", {}).get("open_id", "")
         if msg.get("chat_type") != "p2p" or not sender:
             return
+        chat = msg.get("chat_id", "") or sender
         set_state(last_event=int(now))
         loop = asyncio.get_running_loop()
         owner = CFG.get("owner_open_id", "")
@@ -656,19 +659,24 @@ class Bot:
             name = await loop.run_in_executor(None, feishu_user_name, sender)
             CFG["owner_open_id"], CFG["owner_name"] = sender, name
             uci_set("owner_open_id", sender)
+            CFG["owner_chat_id"] = chat
+            uci_set("owner_chat_id", chat)
             if name:
                 uci_set("owner_name", name)
             set_state(owner=name or sender)
             log("已绑定主人：", name or sender)
-            await loop.run_in_executor(None, feishu_send, sender, "你好%s，已把你绑定为这台路由器的主人，以后只听你的。\n\n%s" % (
+            await loop.run_in_executor(None, feishu_send, chat, "你好%s，已把你绑定为这台路由器的主人，以后只听你的。\n\n%s" % (
                 ("，" + name) if name else "", HELP))
             return
         if sender != owner:
             log("拒绝陌生人消息：", sender)
-            await loop.run_in_executor(None, feishu_send, sender, "抱歉，我只为这台路由器的主人服务。")
+            await loop.run_in_executor(None, feishu_send, chat, "抱歉，我只为这台路由器的主人服务。")
             return
+        if chat.startswith("oc_") and CFG.get("owner_chat_id") != chat:
+            CFG["owner_chat_id"] = chat
+            uci_set("owner_chat_id", chat)
         if msg.get("message_type") != "text":
-            await loop.run_in_executor(None, feishu_send, sender, "目前只看得懂文字消息。")
+            await loop.run_in_executor(None, feishu_send, chat, "目前只看得懂文字消息。")
             return
         try:
             text = json.loads(msg.get("content") or "{}").get("text", "")
@@ -684,7 +692,7 @@ class Bot:
             except Exception as ex:
                 log("处理出错：", ex)
                 reply = "出错了：%s" % ex
-            await loop.run_in_executor(None, feishu_send, sender, reply)
+            await loop.run_in_executor(None, feishu_send, chat, reply)
 
 
 # ---------------------------------------------------------------- 自检（LuCI「测试连接」）
