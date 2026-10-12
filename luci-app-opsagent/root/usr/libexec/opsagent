@@ -33,6 +33,7 @@ restart)
 unbind)
 	uci -q delete opsagent.main.owner_open_id
 	uci -q delete opsagent.main.owner_name
+	uci -q delete opsagent.main.owner_chat_id
 	uci commit opsagent
 	/etc/init.d/opsagent restart >/dev/null 2>&1
 	echo '{"ok":true}'
