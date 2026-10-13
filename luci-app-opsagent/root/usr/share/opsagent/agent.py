@@ -10,8 +10,9 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, html as htmlmod, inspect, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r11"
+VERSION = "1.0.0-r12"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
+DINGTALK = os.environ.get("OPSAGENT_DINGTALK", "https://api.dingtalk.com")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
 
@@ -416,6 +417,50 @@ def feishu_send(target, text):
                       {"Authorization": "Bearer " + feishu_token()})
         if j.get("code") != 0:
             log("发送飞书消息失败:", j.get("code"), j.get("msg"))
+
+
+def is_dt():
+    return CFG.get("channel") == "dingtalk"
+
+
+_dtok = {"v": "", "exp": 0}
+_dt_hook = {"url": "", "exp": 0}
+
+
+def dt_token():
+    if _dtok["v"] and time.time() < _dtok["exp"] - 120:
+        return _dtok["v"]
+    j = http_json(DINGTALK + "/v1.0/oauth2/accessToken",
+                  {"appKey": CFG.get("dt_client_id"), "appSecret": CFG.get("dt_client_secret")})
+    if not j.get("accessToken"):
+        raise RuntimeError("钉钉鉴权失败：%s %s" % (j.get("code", j.get("http_status", "")), j.get("message", j)))
+    _dtok["v"], _dtok["exp"] = j["accessToken"], time.time() + int(j.get("expireIn", 7200))
+    return _dtok["v"]
+
+
+def dt_send(text):
+    """优先用消息自带的 sessionWebhook 回复；过期了就用机器人单聊接口主动发给主人"""
+    text = text[:18000]
+    if _dt_hook["url"] and time.time() < _dt_hook["exp"] - 60:
+        j = http_json(_dt_hook["url"], {"msgtype": "text", "text": {"content": text}})
+        if j.get("errcode", 0) == 0:
+            return
+        log("sessionWebhook 发送失败，改用单聊接口：", j)
+    uid = CFG.get("owner_open_id")
+    if not uid:
+        raise RuntimeError("还没有绑定主人，无法主动发消息")
+    j = http_json(DINGTALK + "/v1.0/robot/oToMessages/batchSend",
+                  {"robotCode": CFG.get("dt_client_id"), "userIds": [uid], "msgKey": "sampleText",
+                   "msgParam": json.dumps({"content": text}, ensure_ascii=False)},
+                  {"x-acs-dingtalk-access-token": dt_token()})
+    if not j.get("processQueryKey"):
+        raise RuntimeError("钉钉发送失败：%s" % (j.get("message") or j))
+
+
+def im_send(target, text):
+    if is_dt():
+        return dt_send(text)
+    return feishu_send(target, text)
 
 
 def feishu_user_name(open_id):
@@ -851,7 +896,7 @@ class Agent:
         self.history = h
 
     def send(self, text):
-        feishu_send(CFG.get("owner_chat_id") or CFG["owner_open_id"], text)
+        im_send(CFG.get("owner_chat_id") or CFG["owner_open_id"], text)
 
     def think(self, user_text):
         """同步：跑一轮工具循环，返回给用户的文本"""
@@ -1167,24 +1212,25 @@ class Bot:
             name = await loop.run_in_executor(None, feishu_user_name, sender)
             CFG["owner_open_id"], CFG["owner_name"] = sender, name
             uci_set("owner_open_id", sender)
+            uci_set("owner_channel", "feishu")
             CFG["owner_chat_id"] = chat
             uci_set("owner_chat_id", chat)
             if name:
                 uci_set("owner_name", name)
             set_state(owner=name or sender)
             log("已绑定主人：", name or sender)
-            await loop.run_in_executor(None, feishu_send, chat, "你好%s，已把你绑定为这台路由器的主人，以后只听你的。\n\n%s" % (
+            await loop.run_in_executor(None, im_send, chat, "你好%s，已把你绑定为这台路由器的主人，以后只听你的。\n\n%s" % (
                 ("，" + name) if name else "", HELP))
             return
         if sender != owner:
             log("拒绝陌生人消息：", sender)
-            await loop.run_in_executor(None, feishu_send, chat, "抱歉，我只为这台路由器的主人服务。")
+            await loop.run_in_executor(None, im_send, chat, "抱歉，我只为这台路由器的主人服务。")
             return
         if chat.startswith("oc_") and CFG.get("owner_chat_id") != chat:
             CFG["owner_chat_id"] = chat
             uci_set("owner_chat_id", chat)
         if msg.get("message_type") != "text":
-            await loop.run_in_executor(None, feishu_send, chat, "目前只看得懂文字消息。")
+            await loop.run_in_executor(None, im_send, chat, "目前只看得懂文字消息。")
             return
         try:
             text = json.loads(msg.get("content") or "{}").get("text", "")
@@ -1193,9 +1239,13 @@ class Bot:
         text = re.sub(r"@_user_\d+", "", text).strip()
         if not text:
             return
+        await self.on_text(chat, text)
+
+    async def on_text(self, chat, text):
+        loop = asyncio.get_running_loop()
         log("收到：", text[:200])
         if self.agent.lock.locked():
-            await loop.run_in_executor(None, feishu_send, chat, "⏳ 上一件事还在处理中（%s），做完马上看这条。" % (self.agent.cur or "思考中"))
+            await loop.run_in_executor(None, im_send, chat, "⏳ 上一件事还在处理中（%s），做完马上看这条。" % (self.agent.cur or "思考中"))
         async with self.agent.lock:
             self.agent.cur = ""
             beat = asyncio.ensure_future(self.heartbeat(chat))
@@ -1206,7 +1256,7 @@ class Bot:
                 reply = "出错了：%s" % ex
             finally:
                 beat.cancel()
-            await loop.run_in_executor(None, feishu_send, chat, reply)
+            await loop.run_in_executor(None, im_send, chat, reply)
 
     async def heartbeat(self, chat):
         """处理超过 8 秒先回一句「正在处理」，之后每 3 分钟报一次进度，让用户知道没在偷懒"""
@@ -1214,10 +1264,10 @@ class Bot:
         t0 = time.time()
         try:
             await asyncio.sleep(8)
-            await loop.run_in_executor(None, feishu_send, chat, "⏳ 收到，正在处理…" + ("（%s）" % self.agent.cur if self.agent.cur else ""))
+            await loop.run_in_executor(None, im_send, chat, "⏳ 收到，正在处理…" + ("（%s）" % self.agent.cur if self.agent.cur else ""))
             while True:
                 await asyncio.sleep(180)
-                await loop.run_in_executor(None, feishu_send, chat, "⏳ 还在处理（已 %d 分钟）：%s" % (
+                await loop.run_in_executor(None, im_send, chat, "⏳ 还在处理（已 %d 分钟）：%s" % (
                     (time.time() - t0) // 60, self.agent.cur or "思考中"))
         except asyncio.CancelledError:
             pass
@@ -1226,6 +1276,108 @@ class Bot:
 
 
 # ---------------------------------------------------------------- 自检（LuCI「测试连接」）
+class DingBot(Bot):
+    """钉钉 Stream 模式（长连接，无需公网 IP）"""
+
+    def endpoint(self):
+        j = http_json(DINGTALK + "/v1.0/gateway/connections/open",
+                      {"clientId": CFG.get("dt_client_id"), "clientSecret": CFG.get("dt_client_secret"),
+                       "subscriptions": [{"type": "CALLBACK", "topic": "/v1.0/im/bot/messages/get"}],
+                       "ua": "opsagent/" + VERSION})
+        if not j.get("endpoint"):
+            raise RuntimeError("获取钉钉长连接失败：%s %s" % (j.get("code", j.get("http_status", "")), j.get("message", j)))
+        return j["endpoint"] + "?ticket=" + j["ticket"]
+
+    async def run(self):
+        import websockets
+        delay = 5
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                set_state(state="connecting", error="")
+                url = await loop.run_in_executor(None, self.endpoint)
+                kw = {"max_size": 8 * 1024 * 1024}
+                if "proxy" in inspect.signature(websockets.connect).parameters:
+                    kw["proxy"] = None
+                async with websockets.connect(url, **kw) as ws:
+                    self.ws = ws
+                    log("已连上钉钉长连接")
+                    set_state(state="online", online_since=int(time.time()), error="")
+                    delay = 5
+                    async for raw in ws:
+                        if await self.on_dt(raw) == "reconnect":
+                            break
+                log("长连接断开，准备重连")
+            except Exception as e:
+                log("连接出错：", e)
+                set_state(state="error", error=str(e)[:300])
+            self.ws = None
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 120)
+
+    async def on_dt(self, raw):
+        try:
+            f = json.loads(raw)
+        except ValueError:
+            return
+        h = f.get("headers") or {}
+        topic, typ = h.get("topic", ""), f.get("type", "")
+        if typ == "SYSTEM":
+            if topic == "ping":
+                await self.ws.send(json.dumps({"code": 200, "headers": h, "message": "OK", "data": f.get("data", "")}))
+            elif topic == "disconnect":
+                return "reconnect"
+            return
+        await self.ws.send(json.dumps({"code": 200, "headers": {"contentType": "application/json", "messageId": h.get("messageId", "")},
+                                       "message": "OK", "data": json.dumps({"response": None})}))
+        if topic != "/v1.0/im/bot/messages/get":
+            return
+        try:
+            d = json.loads(f.get("data") or "{}")
+        except ValueError:
+            return
+        mid = d.get("msgId") or h.get("messageId", "")
+        now = time.time()
+        if mid in self.seen:
+            return
+        self.seen[mid] = now
+        if len(self.seen) > 500:
+            for k in [k for k, v in self.seen.items() if now - v > 3600]:
+                self.seen.pop(k, None)
+        if d.get("conversationType") != "1":
+            return
+        sender = d.get("senderStaffId") or d.get("senderId", "")
+        if not sender:
+            return
+        if d.get("sessionWebhook"):
+            _dt_hook["url"] = d["sessionWebhook"]
+            _dt_hook["exp"] = int(d.get("sessionWebhookExpiredTime") or 0) / 1000.0 or now + 3600
+        set_state(last_event=int(now))
+        loop = asyncio.get_running_loop()
+        owner = CFG.get("owner_open_id", "")
+        if not owner:
+            name = d.get("senderNick", "")
+            CFG["owner_open_id"], CFG["owner_name"] = sender, name
+            uci_set("owner_open_id", sender)
+            uci_set("owner_channel", "dingtalk")
+            if name:
+                uci_set("owner_name", name)
+            set_state(owner=name or sender)
+            log("已绑定主人：", name or sender)
+            await loop.run_in_executor(None, dt_send, "你好%s，已把你绑定为这台路由器的主人，以后只听你的。\n\n%s" % (
+                ("，" + name) if name else "", HELP))
+            return
+        if sender != owner:
+            log("拒绝陌生人消息：", sender)
+            _dt_hook["url"] = ""
+            return
+        if d.get("msgtype") != "text":
+            await loop.run_in_executor(None, dt_send, "目前只看得懂文字消息。")
+            return
+        text = ((d.get("text") or {}).get("content") or "").strip()
+        if text:
+            await self.on_text("dt", text)
+
 def selftest():
     res = {"feishu": "", "llm": "", "websockets": ""}
     try:
@@ -1233,16 +1385,29 @@ def selftest():
         res["websockets"] = "ok " + getattr(websockets, "__version__", "")
     except Exception as e:
         res["websockets"] = "缺少 python3-websockets：%s" % e
-    try:
-        feishu_token()
-        res["feishu"] = "ok"
+    if is_dt():
+        res.pop("feishu")
         try:
-            Bot().endpoint()
-            res["feishu"] = "ok（长连接地址获取成功）"
+            dt_token()
+            res["dingtalk"] = "ok（令牌正常）"
+            try:
+                DingBot().endpoint()
+                res["dingtalk"] = "ok（长连接地址获取成功）"
+            except Exception as e:
+                res["dingtalk"] = "令牌正常，但长连接：%s" % e
         except Exception as e:
-            res["feishu"] = "令牌正常，但长连接：%s" % e
-    except Exception as e:
-        res["feishu"] = str(e)
+            res["dingtalk"] = str(e)
+    else:
+        try:
+            feishu_token()
+            res["feishu"] = "ok"
+            try:
+                Bot().endpoint()
+                res["feishu"] = "ok（长连接地址获取成功）"
+            except Exception as e:
+                res["feishu"] = "令牌正常，但长连接：%s" % e
+        except Exception as e:
+            res["feishu"] = str(e)
     try:
         url = CFG.get("base_url", "https://api.deepseek.com").rstrip("/") + "/chat/completions"
         j = http_json(url, {"model": CFG.get("model") or "deepseek-flash", "max_tokens": 5,
@@ -1287,7 +1452,14 @@ def main():
         print(classify(" ".join(sys.argv[2:])))
         return
     collect_secrets()
-    bot = Bot()
+    ch = "dingtalk" if is_dt() else "feishu"
+    if CFG.get("owner_open_id") and (CFG.get("owner_channel") or "feishu") != ch:
+        log("聊天渠道已切换为 %s，清除原主人绑定，第一个发消息的人会成为新主人" % ch)
+        for k in ("owner_open_id", "owner_name", "owner_chat_id"):
+            CFG[k] = ""
+            subprocess.run(["uci", "-q", "delete", "opsagent.main." + k])
+        uci_set("owner_channel", ch)
+    bot = DingBot() if is_dt() else Bot()
     try:
         bot.agent.board = subprocess.run(["sh", "-c", "ubus call system board | jsonfilter -e '@.model' -e '@.release.description' 2>/dev/null | tr '\\n' ' '"],
                                          capture_output=True, text=True, timeout=10).stdout.strip() or "斐讯 N1"
