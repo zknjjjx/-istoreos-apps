@@ -1,4 +1,18 @@
 'use strict';
+
+window.cfyxipCopy = function(btn) {
+	var t = document.getElementById('cfyxip-raw').textContent, ok = false;
+	var done = function() { var o = btn.textContent; btn.textContent = '已复制 ✓'; setTimeout(function() { btn.textContent = o; }, 1500); };
+	// 路由器后台是 http，浏览器不允许 navigator.clipboard，用老办法兜底
+	var ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+	document.body.appendChild(ta); ta.select();
+	try { ok = document.execCommand('copy'); } catch (e) {}
+	document.body.removeChild(ta);
+	if (ok) return done();
+	if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(t).then(done);
+	window.prompt('按 Ctrl+C 复制：', t);
+};
+
 'require view';
 'require form';
 'require fs';
@@ -176,9 +190,14 @@ return view.extend({
 		o = s.taboption('cron', form.Flag, 'cron_enable', '启用定时扫描',
 			'到点自动扫描一次，扫完自动更新 xyip.txt，开了 GitHub 推送的话也会自动推送。');
 
-		o = s.taboption('cron', form.MultiValue, 'cron_hours', '每天几点',
-			'可以多选，例如 5 点和 17 点各跑一次。建议避开你上网的高峰，扫描时会占一些带宽。');
-		o.widget = 'select'; o.size = 8;
+		o = s.taboption('cron', form.ListValue, 'cron_hour', '每天几点',
+			'每天在这个时间扫描一次。建议选半夜或清晨（如 05 点），避开你上网的高峰，扫描时会占一些带宽。');
+		o.cfgvalue = function(sid) {
+			var v = this.map.data.get('cfyxip', sid, 'cron_hour');
+			if (v == null) { var old = this.map.data.get('cfyxip', sid, 'cron_hours'); v = Array.isArray(old) ? old[0] : old; }
+			return v;
+		};
+		o.write = function(sid, v) { this.map.data.unset('cfyxip', sid, 'cron_hours'); return this.map.data.set('cfyxip', sid, 'cron_hour', v); };
 		for (var h = 0; h < 24; h++) o.value(String(h), (h < 10 ? '0' : '') + h + ' 点');
 		o.default = '5';
 		o.depends('cron_enable', '1');
@@ -248,7 +267,7 @@ return view.extend({
 				p = this.map.data.get('cfyxip', sid, 'gh_path') || 'xyip.txt';
 			if (!repo) return '<span style="color:#888">填好仓库并保存后显示</span>';
 			var u = 'https://raw.githubusercontent.com/' + repo + '/' + br + '/' + p.replace(/^\//, '');
-			return '<code>' + u + '</code><div style="color:#888;font-size:90%">节点（edgetunnel 等）的优选 IP 订阅 / ADDAPI 直接填这个地址。在国内电脑上打不开属正常（raw 域名被墙），想自己查看可在前面加 https://gh-proxy.com/ 。</div>';
+			return '<code id="cfyxip-raw">' + u + '</code> <button type="button" class="btn cbi-button" style="margin-left:6px;padding:0 10px" onclick="cfyxipCopy(this)">复制</button><div style="color:#888;font-size:90%">节点（edgetunnel 等）的优选 IP 订阅 / ADDAPI 直接填这个地址。在国内电脑上打不开属正常（raw 域名被墙），想自己查看可在前面加 https://gh-proxy.com/ 。</div>';
 		};
 
 		o = s.taboption('help', form.DummyValue, '_help');
