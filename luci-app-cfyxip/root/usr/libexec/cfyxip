@@ -57,7 +57,7 @@ cron)
 	C=/etc/crontabs/root; touch $C
 	sed -i '/cfyxip-cron/d' $C
 	if [ "$(uci -q get cfyxip.main.cron_enable)" = 1 ]; then
-		h=$(uci -q get cfyxip.main.cron_hours | tr ' ' ','); m=$(uci -q get cfyxip.main.cron_minute)
+		h=$(uci -q get cfyxip.main.cron_hour); [ -n "$h" ] || h=$(uci -q get cfyxip.main.cron_hours | awk '{print $1}'); m=$(uci -q get cfyxip.main.cron_minute)
 		echo "${m:-0} ${h:-5} * * * /usr/libexec/cfyxip cron-run >/dev/null 2>&1 # cfyxip-cron" >> $C
 	fi
 	/etc/init.d/cron restart >/dev/null 2>&1
