@@ -1,0 +1,64 @@
+#!/bin/sh
+# luci-app-cfyxip 后端：status | start | stop | push | log [N] | result | colos | cron | txt
+BIN=/usr/bin/cfyxip
+RUN=/tmp/cfyxip
+DATA=/etc/cfyxip
+LOG=$RUN/scan.log
+mkdir -p $RUN $DATA
+
+pid_alive() { [ -f $RUN/pid ] && kill -0 "$(cat $RUN/pid)" 2>/dev/null; }
+
+case "$1" in
+status)
+	running=0; pid_alive && running=1
+	st=$(cat $RUN/status.json 2>/dev/null); [ -n "$st" ] || st='{}'
+	last=0; [ -f $DATA/result.json ] && last=$(date -r $DATA/result.json +%s 2>/dev/null || echo 0)
+	n=0; [ -f $DATA/xyip.txt ] && n=$(grep -c . $DATA/xyip.txt)
+	cron=0; grep -q 'cfyxip-cron' /etc/crontabs/root 2>/dev/null && cron=1
+	printf '{"running":%s,"status":%s,"last":%s,"count":%s,"cron":%s,"version":"%s","now":%s}\n' \
+		$running "$st" "${last:-0}" "${n:-0}" $cron "$($BIN version 2>/dev/null)" "$(date +%s)"
+	;;
+start|cron-run)
+	if pid_alive; then echo '{"ok":false,"msg":"已经在扫描了"}'; exit 0; fi
+	[ "$1" = cron-run ] && logger -t cfyxip "定时扫描开始"
+	setsid sh -c "echo \$\$ > $RUN/pid; exec $BIN scan > $LOG 2>&1" < /dev/null > /dev/null 2>&1 &
+	sleep 1
+	echo '{"ok":true}'
+	;;
+stop)
+	pid_alive && { kill "$(cat $RUN/pid)"; sleep 1; }
+	rm -f $RUN/pid
+	[ -f $RUN/status.json ] && sed -i 's/"state":"running"/"state":"error","message":"已手动停止"/' $RUN/status.json
+	echo '{"ok":true}'
+	;;
+push)
+	out=$($BIN push 2>&1); rc=$?
+	echo "$(date +%T) [手动推送] $out" >> $LOG
+	[ $rc = 0 ] && echo '{"ok":true}' || printf '{"ok":false,"msg":"%s"}\n' "$(echo "$out" | tr '"\n' "' " )"
+	;;
+log)
+	tail -n "${2:-300}" $LOG 2>/dev/null
+	;;
+result)
+	cat $DATA/result.json 2>/dev/null || echo '{"results":[]}'
+	;;
+txt)
+	cat $DATA/xyip.txt 2>/dev/null
+	;;
+colos)
+	$BIN colos
+	;;
+cron)
+	C=/etc/crontabs/root; touch $C
+	sed -i '/cfyxip-cron/d' $C
+	if [ "$(uci -q get cfyxip.main.cron_enable)" = 1 ]; then
+		h=$(uci -q get cfyxip.main.cron_hours | tr ' ' ','); m=$(uci -q get cfyxip.main.cron_minute)
+		echo "${m:-0} ${h:-5} * * * /usr/libexec/cfyxip cron-run >/dev/null 2>&1 # cfyxip-cron" >> $C
+	fi
+	/etc/init.d/cron restart >/dev/null 2>&1
+	echo '{"ok":true}'
+	;;
+*)
+	echo "用法: $0 status|start|stop|push|log [N]|result|txt|colos|cron" >&2; exit 1
+	;;
+esac
