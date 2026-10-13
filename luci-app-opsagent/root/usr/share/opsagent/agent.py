@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, html as htmlmod, inspect, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r10"
+VERSION = "1.0.0-r11"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
 
@@ -308,6 +308,23 @@ def nas_prefix():
     for i, (k, v) in enumerate(kv):
         env["GIT_CONFIG_KEY_%d" % i], env["GIT_CONFIG_VALUE_%d" % i] = k, v
     return "export " + " ".join("%s=%s" % (k, shlex.quote(v)) for k, v in env.items()) + "\n"
+
+
+_nas_up = {"t": 0, "ok": True}
+
+
+def nas_reachable():
+    """3 秒内连不上 NAS 的 SSH 端口就当离线（结果缓存 30 秒），免得每条命令都干等"""
+    if time.time() - _nas_up["t"] < 30:
+        return _nas_up["ok"]
+    import socket
+    try:
+        socket.create_connection((CFG["nas_host"], int(CFG.get("nas_port") or 22)), timeout=3).close()
+        ok = True
+    except Exception:
+        ok = False
+    _nas_up.update(t=time.time(), ok=ok)
+    return ok
 
 
 def run_nas(cmd, timeout):
@@ -781,6 +798,7 @@ SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 
 {gh}
 {cf}
 {web}
+- 路由器从 GitHub 直接下载很慢，下载 github.com / raw.githubusercontent.com 的文件时在网址前加 https://gh-proxy.com/ 加速，不要绕道 NAS 中转。
 当前时间：{now}"""
 
 
@@ -804,6 +822,7 @@ class Agent:
         self.pending = None  # {"cmd","reason","ts"}
         self.lock = asyncio.Lock()
         self.board = ""
+        self.cur = ""  # 当前在做的步骤，给「还在处理」提示用
         try:  # 插件重启后接着上次的对话和待确认命令
             with open(SESSION_FILE) as f:
                 j = json.load(f)
@@ -822,7 +841,7 @@ class Agent:
             log("保存会话失败：", e)
 
     def sys_msg(self):
-        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器（N1）上虽然装了 docker 但不跑用户的容器；用户说的 docker、容器、项目、开发，默认都是指 NAS，用 nas_command，不要同时在路由器上查。只有明确说路由器/N1/AdGuard/DNS/隧道时才用 run_command。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), router=("用户已允许你在路由器上直接改配置、装/卸软件、重启服务，不用确认；但动手前想清楚影响，别断掉自己的网络（dnsmasq/AdGuard/隧道 n1/防火墙/网络接口），改 uci 前先备份原值，改完验证并汇报改了什么。" if CFG.get("router_auto", "0") == "1" else "改动类命令会自动请用户确认，你不用再问一遍。"), web=("- 你可以联网：web_search 搜索、web_fetch 打开网页。日常问题（翻译、写代码、解释概念等）直接回答；涉及实时信息（天气、新闻、价格、汇率、版本更新、赛事、政策）或你不确定的事实，一定先搜再答，不要凭记忆编，回答末尾附上 1~3 个来源链接。天气直接 web_fetch wttr.in。" if web_on() else "- 你没有联网能力，实时信息（天气、新闻、价格）请说明无法确认。"), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
+        return {"role": "system", "content": SYS_PROMPT.format(agh=("- AdGuard Home 接口需要登录，已放在环境变量里：curl -s -u \"$AGH_AUTH\" http://127.0.0.1:3000/control/stats（今日统计，num_blocked_filtering 是拦截数），/control/status、/control/querylog?limit=20 同理。" if CFG.get("agh_pass") else "- AdGuard Home 接口需要登录，但用户没在插件里填账号，查不到统计时请告诉用户去 LuCI → AI 运维助手 → 高级 里填。"), nas=("- 用户的 NAS（%s，飞牛 fnOS / Debian 12）用 nas_command 操作，你在上面有 root 权限，用来长期开发、测试应用：放手去做，装环境、写代码、构建、运行、看日志都直接执行，每完成一个阶段简短汇报进度。系统盘（/）很小，开发项目、数据、docker 卷都放 NAS 的 /vol1/dev/<项目名>（不存在就建），不要往 /root 或系统盘塞大文件。路由器（N1）上虽然装了 docker 但不跑用户的容器；用户说的 docker、容器、项目、开发，默认都是指 NAS，用 nas_command，不要同时在路由器上查。只有明确说路由器/N1/AdGuard/DNS/隧道时才用 run_command。NAS 不是一直开机：为路由器服务的东西（定时任务、优选 IP、DNS/hosts 下发、路由器插件）一律装在路由器本机（定时任务写 /etc/crontabs/root），不能依赖 NAS；NAS 只用于开发、docker 和大文件。" % CFG.get("nas_host") if nas_on() else ""), gh=("- 已接入用户的 GitHub（账号 %s）：查询/触发构建/发 Release 用 github_api；在 NAS 上 git clone/push https://github.com/... 已自动带上凭据（环境变量 GH_TOKEN 也可用），不要把令牌写进文件或 remote 地址。" % (gh_me().get("login") or "?") if gh_on() else ""), cf=("- 已接入用户的 Cloudflare（account_id=%s，路径里可直接写 {account_id}）：用 cloudflare_api 管隧道和 DNS。路由器上跑着隧道 n1（ssh.007.cc.cd 等，是远程维护通道，千万别删改坏），NAS 上有隧道 oes；在 NAS 上做的应用要对外访问时，优先给 oes 隧道加公网主机名。" % cf_creds()[1] if cf_on() else ""), router=("用户已允许你在路由器上直接改配置、装/卸软件、重启服务，不用确认；但动手前想清楚影响，别断掉自己的网络（dnsmasq/AdGuard/隧道 n1/防火墙/网络接口），改 uci 前先备份原值，改完验证并汇报改了什么。" if CFG.get("router_auto", "0") == "1" else "改动类命令会自动请用户确认，你不用再问一遍。"), web=("- 你可以联网：web_search 搜索、web_fetch 打开网页。日常问题（翻译、写代码、解释概念等）直接回答；涉及实时信息（天气、新闻、价格、汇率、版本更新、赛事、政策）或你不确定的事实，一定先搜再答，不要凭记忆编，回答末尾附上 1~3 个来源链接。天气直接 web_fetch wttr.in。" if web_on() else "- 你没有联网能力，实时信息（天气、新闻、价格）请说明无法确认。"), board=self.board, now=time.strftime("%Y-%m-%d %H:%M %a"))}
 
     def trim(self):
         n = cfg_int("history", 30)
@@ -916,18 +935,17 @@ class Agent:
             log("NAS 工具调用 [%s] %s" % (kind, cmd[:500]))
             if kind == "deny":
                 return "已拒绝：" + why
+            if not nas_reachable():
+                return "NAS（%s）现在离线/关机，连不上。不要再调用 nas_command；能在路由器上完成的就用 run_command 在路由器上做，必须用 NAS 的告诉用户等 NAS 开机后再说。" % CFG.get("nas_host")
             if kind == "ro":
-                if to > 60:
-                    try:
-                        self.send("⏳ NAS 执行中（最长 %d 分钟）：%s" % ((to + 59) // 60, reason or cmd[:200]))
-                    except Exception:
-                        pass
+                self.cur = "NAS：" + (reason or cmd[:120])
                 return run_nas(cmd, to)
             if self.pending:
                 return "已有一条命令在等用户确认，请等用户回复后再提新的。"
             self.pending = {"cmd": cmd, "reason": reason or why, "ts": time.time(), "nas": True, "timeout": to}
             return "[等待确认] 这条 NAS 命令属于%s，已发给用户确认。在用户回复前不要再调用工具，直接简短说明你准备做什么。" % why
         kind, why = classify(cmd)
+        self.cur = "路由器：" + (reason or cmd[:120])
         log("工具调用 [%s] %s" % (kind, cmd))
         if kind == "deny":
             return "已拒绝：" + why
@@ -1176,13 +1194,35 @@ class Bot:
         if not text:
             return
         log("收到：", text[:200])
+        if self.agent.lock.locked():
+            await loop.run_in_executor(None, feishu_send, chat, "⏳ 上一件事还在处理中（%s），做完马上看这条。" % (self.agent.cur or "思考中"))
         async with self.agent.lock:
+            self.agent.cur = ""
+            beat = asyncio.ensure_future(self.heartbeat(chat))
             try:
                 reply = await loop.run_in_executor(None, self.agent.handle, text)
             except Exception as ex:
                 log("处理出错：", ex)
                 reply = "出错了：%s" % ex
+            finally:
+                beat.cancel()
             await loop.run_in_executor(None, feishu_send, chat, reply)
+
+    async def heartbeat(self, chat):
+        """处理超过 8 秒先回一句「正在处理」，之后每 3 分钟报一次进度，让用户知道没在偷懒"""
+        loop = asyncio.get_running_loop()
+        t0 = time.time()
+        try:
+            await asyncio.sleep(8)
+            await loop.run_in_executor(None, feishu_send, chat, "⏳ 收到，正在处理…" + ("（%s）" % self.agent.cur if self.agent.cur else ""))
+            while True:
+                await asyncio.sleep(180)
+                await loop.run_in_executor(None, feishu_send, chat, "⏳ 还在处理（已 %d 分钟）：%s" % (
+                    (time.time() - t0) // 60, self.agent.cur or "思考中"))
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log("进度提示发送失败：", e)
 
 
 # ---------------------------------------------------------------- 自检（LuCI「测试连接」）
