@@ -6,6 +6,7 @@
 |---|---|---|
 | [luci-app-cftunnel](luci-app-cftunnel/) | Cloudflare 隧道：不用公网 IP、不开端口，把内网服务发布到自己的域名。API 令牌一键建隧道、绑定域名、自动 DNS，自带 cloudflared | [Releases](../../releases) |
 | [luci-app-opsagent](luci-app-opsagent/) | AI 运维助手：在飞书里用大白话管理路由器，DeepSeek 驱动，长连接免公网 IP；只读命令直接跑，改动类命令需你确认 | [Releases](../../releases) |
+| [luci-app-cfyxip](luci-app-cfyxip/) | Cloudflare优选IP：定时扫描 Cloudflare IP，HTTPS 真实验证 + 落地机房识别 + 测速 + 复验，只留真能用的；可选落地国家，结果推送 GitHub（xyip.txt） | [Releases](../../releases) |
 
 ## 安装
 
