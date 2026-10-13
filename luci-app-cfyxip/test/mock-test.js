@@ -11,7 +11,7 @@ global.L = { resolveDefault: (p, d) => p.catch(() => d) };
 const opts = [];
 class Opt { constructor(type, name, title, desc) { Object.assign(this, { type, name, title, desc, vals: [] }); opts.push(this); } value(k, v) { this.vals.push([k, v]); } depends() {} }
 const section = { tab() {}, taboption(tab, type, name, title, desc) { const o = new Opt(type, name, title, desc); o.tab = tab; o.map = { data: { get: (c, s, k) => ({ gh_repo: 'zknjjjx/cf-preferred-ip' })[k] } }; return o; } };
-const form = { Map: function() { this.section = () => section; this.render = () => Promise.resolve(E('div', {}, 'FORM')); }, NamedSection: 1, Value: 'Value', Flag: 'Flag', MultiValue: 'MultiValue', DynamicList: 'DynamicList', DummyValue: 'DummyValue' };
+const form = { Map: function() { this.section = () => section; this.render = () => Promise.resolve(E('div', {}, 'FORM')); }, NamedSection: 1, Value: 'Value', Flag: 'Flag', MultiValue: 'MultiValue', DynamicList: 'DynamicList', DummyValue: 'DummyValue', Button: 'Button' };
 let running = true;
 const fs = { exec: (b, args) => {
 	let out = {};
