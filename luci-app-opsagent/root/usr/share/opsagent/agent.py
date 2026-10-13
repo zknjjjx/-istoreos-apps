@@ -10,7 +10,7 @@ AI 运维助手（luci-app-opsagent）
 import asyncio, html as htmlmod, inspect, json, os, re, shlex, shutil, subprocess, sys, time, urllib.request, urllib.error, base64
 from urllib.parse import urlparse, parse_qs
 
-VERSION = "1.0.0-r12"
+VERSION = "1.0.0-r13"
 FEISHU = os.environ.get("OPSAGENT_FEISHU", "https://open.feishu.cn")
 DINGTALK = os.environ.get("OPSAGENT_DINGTALK", "https://api.dingtalk.com")
 STATUS_FILE = os.environ.get("OPSAGENT_STATUS", "/tmp/opsagent.status")
@@ -849,8 +849,14 @@ SYS_PROMPT = """你是「N1 运维助手」，运行在用户家里的斐讯 N1 
 
 def llm(messages):
     url = CFG.get("base_url", "https://api.deepseek.com").rstrip("/") + "/chat/completions"
-    j = http_json(url, {"model": CFG.get("model") or "deepseek-flash", "messages": messages, "tools": tools(), "temperature": 0.2},
-                  {"Authorization": "Bearer " + CFG.get("api_key", "")}, timeout=120)
+    body = {"model": CFG.get("model") or "deepseek-flash", "messages": messages, "tools": tools(), "temperature": 0.2}
+    # 免费模型高峰期常返回 429/5xx：等一会儿自动重试，最多 4 次（约 5+10+20+40 秒）
+    for wait in (5, 10, 20, 40, None):
+        j = http_json(url, body, {"Authorization": "Bearer " + CFG.get("api_key", "")}, timeout=120)
+        if "choices" in j or wait is None or j.get("http_status") not in (429, 500, 502, 503, 504):
+            break
+        log("大模型接口 %s，%d 秒后重试" % (j.get("http_status"), wait))
+        time.sleep(wait)
     if "choices" not in j:
         err = j.get("error", {})
         raise RuntimeError("大模型接口出错：%s %s" % (j.get("http_status", ""), err.get("message") if isinstance(err, dict) else j))
