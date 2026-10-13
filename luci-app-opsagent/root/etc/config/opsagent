@@ -1,6 +1,7 @@
 
 config opsagent 'main'
 	option enabled '0'
+	option channel 'feishu'
 	option app_id ''
 	option app_secret ''
 	option api_key ''
