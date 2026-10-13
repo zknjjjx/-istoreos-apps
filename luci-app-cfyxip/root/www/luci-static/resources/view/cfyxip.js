@@ -1,18 +1,5 @@
 'use strict';
 
-window.cfyxipCopy = function(btn) {
-	var t = document.getElementById('cfyxip-raw').textContent, ok = false;
-	var done = function() { var o = btn.textContent; btn.textContent = '已复制 ✓'; setTimeout(function() { btn.textContent = o; }, 1500); };
-	// 路由器后台是 http，浏览器不允许 navigator.clipboard，用老办法兜底
-	var ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
-	document.body.appendChild(ta); ta.select();
-	try { ok = document.execCommand('copy'); } catch (e) {}
-	document.body.removeChild(ta);
-	if (ok) return done();
-	if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(t).then(done);
-	window.prompt('按 Ctrl+C 复制：', t);
-};
-
 'require view';
 'require form';
 'require fs';
@@ -38,6 +25,19 @@ function fmtTime(ts) {
 	return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
 }
 function hint(t) { return E('div', { 'style': 'color:#888;font-size:90%' }, t); }
+
+window.cfyxipCopy = function(btn) {
+	var t = document.getElementById('cfyxip-raw').textContent, ok = false;
+	var done = function() { var o = btn.textContent; btn.textContent = '已复制 ✓'; setTimeout(function() { btn.textContent = o; }, 1500); };
+	// 路由器后台是 http，浏览器不允许 navigator.clipboard，用老办法兜底
+	var ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+	document.body.appendChild(ta); ta.select();
+	try { ok = document.execCommand('copy'); } catch (e) {}
+	document.body.removeChild(ta);
+	if (ok) return done();
+	if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(t).then(done);
+	window.prompt('按 Ctrl+C 复制：', t);
+};
 
 return view.extend({
 	load: function() {
