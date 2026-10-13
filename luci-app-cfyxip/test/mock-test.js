@@ -1,4 +1,5 @@
 // 用假的 LuCI 环境跑一遍 cfyxip.js：load → render → 按钮 → 刷新，检查不会抛错
+global.window = global;
 const src = require('fs').readFileSync(process.argv[2] || 'root/www/luci-static/resources/view/cfyxip.js', 'utf8');
 function Node(tag, a, k) { this.tag = tag; this.attrs = a || {}; this.children = []; this.value = ''; this.scrollTop = 0; this.clientHeight = 0; this.scrollHeight = 0; if (k !== undefined) this.add(k); }
 Node.prototype.add = function(k) { if (Array.isArray(k)) k.forEach(x => this.add(x)); else if (k !== '' && k != null) this.children.push(k); };
