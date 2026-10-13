@@ -1,5 +1,5 @@
 #!/bin/sh /etc/rc.common
-# AI 运维助手：飞书机器人（长连接）+ DeepSeek
+# AI 运维助手：飞书 / 钉钉机器人（长连接）+ DeepSeek
 START=99
 STOP=10
 USE_PROCD=1
@@ -7,11 +7,16 @@ PROG=/usr/share/opsagent/agent.py
 
 start_service() {
 	config_load opsagent
-	local enabled app_id app_secret api_key
+	local enabled app_id app_secret api_key channel
 	config_get enabled main enabled 0
+	config_get channel main channel feishu
 	config_get app_id main app_id
 	config_get app_secret main app_secret
 	config_get api_key main api_key
+	if [ "$channel" = dingtalk ]; then
+		config_get app_id main dt_client_id
+		config_get app_secret main dt_client_secret
+	fi
 	[ "$enabled" = 1 ] || return 0
 	[ -n "$app_id" ] && [ -n "$app_secret" ] && [ -n "$api_key" ] || { logger -t opsagent "未填写 App ID / App Secret / API Key，不启动"; return 0; }
 	command -v python3 >/dev/null || { logger -t opsagent "缺少 python3"; return 0; }
