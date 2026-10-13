@@ -1,0 +1,51 @@
+name: luci-app-cfyxip
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号，如 1.0.0-r1'
+        required: true
+        default: '1.0.0-r1'
+  push:
+    tags: ['cfyxip-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+      - name: 版本号
+        run: |
+          V="${{ github.event.inputs.version }}"
+          [ -n "$V" ] || V="${GITHUB_REF_NAME#cfyxip-v}"
+          echo "V=$V" >> $GITHUB_ENV
+      - name: 自检
+        run: |
+          cd luci-app-cfyxip
+          (cd src && go vet .)
+          node test/mock-test.js
+      - name: 打包 arm64 / amd64
+        run: |
+          cd luci-app-cfyxip
+          for a in arm64 amd64; do sudo env PATH="$PATH" HOME=/tmp sh build/build-apk.sh "$V" $a; done
+          ls -la dist
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: cfyxip-v${{ env.V }}
+          name: luci-app-cfyxip ${{ env.V }}
+          body: |
+            Cloudflare优选IP：定时扫描 Cloudflare IP，HTTPS 真实验证（校验证书 + /cdn-cgi/trace 识别落地机房）+ 测速 + 复验，只留真能用的，结果写成 xyip.txt 并可推送 GitHub。
+            适用于新版 iStoreOS / OpenWrt 25.12+（apk 包管理器）。
+            - 斐讯 N1 等 ARM64 设备：下载 `-arm64.apk`
+            - x86 软路由：下载 `-amd64.apk`
+            安装：iStore → 手动安装 → 上传 apk；或 `apk add --allow-untrusted xxx.apk`
+          files: luci-app-cfyxip/dist/*.apk
