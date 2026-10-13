@@ -1,0 +1,4 @@
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+rm -rf /tmp/luci-indexcache* /tmp/luci-modulecache /tmp/cfyxip 2>/dev/null
+exit 0
