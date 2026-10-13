@@ -67,7 +67,7 @@ return view.extend({
 		rows.push(row('主人', st.owner_open_id
 			? E('span', {}, [(st.owner_name || '') + ' ', E('code', {}, st.owner_open_id)])
 			: E('span', { 'style': 'color:#888' }, '尚未绑定'),
-			'第一个在飞书里给机器人发消息的人会被绑定为主人，之后机器人只听这个人的。换人请点「解除绑定」。'));
+			'第一个在飞书/钉钉里给机器人发消息的人会被绑定为主人，之后机器人只听这个人的。换人请点「解除绑定」。'));
 		rows.push(row('最近消息', ago(a.last_event, st.now)));
 		return E('table', { 'class': 'table' }, rows);
 	},
@@ -90,18 +90,36 @@ return view.extend({
 
 		var o;
 		o = s.taboption('basic', form.Flag, 'enabled', '启用',
-			'打开后开机自动运行，并保持和飞书的连接。三项密钥都填好才会真正启动。');
+			'打开后开机自动运行，并保持和飞书/钉钉的连接。所选渠道的两项密钥和大模型 API Key 都填好才会真正启动。');
 		o.rmempty = false;
+
+		o = s.taboption('basic', form.ListValue, 'channel', '聊天渠道',
+			'用哪个软件和机器人对话。切换渠道后，原来绑定的主人会被清除，第一个在新渠道里给机器人发消息的人会成为新主人。');
+		o.value('feishu', '飞书');
+		o.value('dingtalk', '钉钉');
+		o.default = 'feishu';
+
+		o = s.taboption('basic', form.Value, 'dt_client_id', '钉钉 Client ID（AppKey）',
+			E('span', {}, ['钉钉开发者后台 → 应用开发 → 企业内部应用 → 你的应用 → 「凭证与基础信息」里的 Client ID。应用需添加「机器人」能力，消息接收模式选「Stream 模式」并发布。 ',
+				link('https://open-dev.dingtalk.com/', '打开钉钉开发者后台')]));
+		o.depends('channel', 'dingtalk');
+
+		o = s.taboption('basic', form.Value, 'dt_client_secret', '钉钉 Client Secret（AppSecret）',
+			'同一页面的 Client Secret。只保存在路由器上，不会发给 AI。');
+		o.password = true;
+		o.depends('channel', 'dingtalk');
 
 		o = s.taboption('basic', form.Value, 'app_id', '飞书 App ID',
 			E('span', {}, ['飞书开放平台 → 你的应用 → 「凭证与基础信息」里的 App ID，形如 cli_a1b2c3…。 ',
 				link('https://open.feishu.cn/app', '打开飞书开发者后台')]));
 		o.placeholder = 'cli_xxxxxxxxxxxxxxxx';
 		o.validate = function(id, v) { return (!v || /^cli_[0-9a-z]+$/.test(v)) ? true : 'App ID 应该以 cli_ 开头'; };
+		o.depends('channel', 'feishu');
 
 		o = s.taboption('basic', form.Value, 'app_secret', '飞书 App Secret',
 			'同一页面的 App Secret。只保存在路由器上，不会发给 AI。');
 		o.password = true;
+		o.depends('channel', 'feishu');
 
 		o = s.taboption('ai', form.Value, 'api_key', 'API Key',
 			E('span', {}, ['DeepSeek 开放平台 → API keys 里创建的密钥，形如 sk-…。 ', link('https://platform.deepseek.com/api_keys', '打开 DeepSeek 控制台')]));
@@ -249,7 +267,7 @@ return view.extend({
 							return E('p', {}, [E('b', {}, k + '：'), E('span', { 'style': 'color:' + (ok ? '#2e7d32' : '#c62828') }, v || '—')]);
 						};
 						ui.showModal('测试结果', [
-							line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '', j.github ? line('GitHub', j.github) : '', j.cloudflare ? line('Cloudflare', j.cloudflare) : '', j.search ? line('联网搜索', j.search) : '',
+							j.dingtalk ? line('钉钉', j.dingtalk) : line('飞书', j.feishu), line('大模型', j.llm), line('websockets 模块', j.websockets), j.nas ? line('NAS', j.nas) : '', j.github ? line('GitHub', j.github) : '', j.cloudflare ? line('Cloudflare', j.cloudflare) : '', j.search ? line('联网搜索', j.search) : '',
 							E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))
 						]);
 					}).catch(function(e) { ui.hideModal(); notify(e.message, 'danger'); });
