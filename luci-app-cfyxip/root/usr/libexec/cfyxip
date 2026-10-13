@@ -36,6 +36,11 @@ push)
 	echo "$(date +%T) [手动推送] $out" >> $LOG
 	[ $rc = 0 ] && echo '{"ok":true}' || printf '{"ok":false,"msg":"%s"}\n' "$(echo "$out" | tr '"\n' "' " )"
 	;;
+ghcheck)
+	out=$($BIN ghcheck 2>&1); rc=$?
+	[ $rc = 0 ] && ok=true || ok=false
+	printf '{"ok":%s,"msg":"%s"}\n' $ok "$(echo "$out" | tr '"\n' "' ")"
+	;;
 log)
 	tail -n "${2:-300}" $LOG 2>/dev/null
 	;;
@@ -59,6 +64,6 @@ cron)
 	echo '{"ok":true}'
 	;;
 *)
-	echo "用法: $0 status|start|stop|push|log [N]|result|txt|colos|cron" >&2; exit 1
+	echo "用法: $0 status|start|stop|push|ghcheck|log [N]|result|txt|colos|cron" >&2; exit 1
 	;;
 esac
