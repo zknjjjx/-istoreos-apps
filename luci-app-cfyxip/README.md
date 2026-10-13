@@ -34,6 +34,15 @@
 
 iStore → 手动安装 → 上传；或 `apk add --allow-untrusted luci-app-cfyxip-*.apk`。装好后在「服务 → Cloudflare优选IP」。
 
+## 推送到自己的仓库
+
+1. GitHub 新建公开仓库，勾选 Add a README file
+2. 生成 Fine-grained 令牌：只选这个仓库，Contents = Read and write
+3. LuCI「GitHub 推送」填 `用户名/仓库名` 和令牌，勾选推送，保存后点「检查推送设置」
+4. 节点订阅填页面显示的 raw 地址
+
+**不用科学上网也能推送**：推送只访问 `api.github.com`，国内一般可直连；被墙的 `raw.githubusercontent.com` 只影响国内浏览器查看，节点（Cloudflare 服务器）拉取不受影响。确实连不上时可填 HTTP/SOCKS5 代理（仅推送使用）。
+
 ## 文件
 
 | 路径 | 说明 |
@@ -52,4 +61,5 @@ node test/mock-test.js                 # LuCI 页面模拟测试
 
 ## 更新记录
 
+- **1.0.0-r2**（2026-10-13）验证域名可填多个（每个节点一个，必须全部通过）；GitHub 推送页加详细教程（新建仓库、生成令牌）、「检查推送设置」按钮、可选 GitHub 代理（HTTP/SOCKS5，仅推送用）；测速站限流（429）时暂停 60 秒再测、中途断开时自动重试，不再把好 IP 误判为 0 速度，日志里写明原因。
 - **1.0.0-r1**（2026-10-13）首个版本。
