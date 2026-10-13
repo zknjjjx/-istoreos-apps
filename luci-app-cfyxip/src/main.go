@@ -1,7 +1,8 @@
 // cfyxip：Cloudflare 优选 IP 扫描器（luci-app-cfyxip 的核心程序）
 //
 // 流程：抽样 IP → TCP 延迟/丢包 → 真实 HTTPS 验证（校验证书 + /cdn-cgi/trace 拿机房）→ 按落地国家/机房过滤
-//       → 测速 → 多轮复验 → 排序取前 N 个 → 写 xyip.txt / result.json → 可选推送到 GitHub
+//
+//	→ 测速 → 多轮复验 → 排序取前 N 个 → 写 xyip.txt / result.json → 可选推送到 GitHub
 //
 // 用法：cfyxip scan [-c uci文件或 show 输出]   cfyxip push   cfyxip colos
 package main
@@ -20,6 +21,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -51,30 +53,32 @@ var (
 
 // ---------------------------------------------------------------- 配置
 type Config struct {
-	Ports        []int
-	Sample       int
-	Threads      int
-	TCPTries     int
-	MaxLatency   int // ms
-	Countries    map[string]bool
-	Colos        map[string]bool
-	ValidateHost string
-	ValidatePath string
-	SpeedTest    bool
-	SpeedHost    string
-	SpeedBytes   int
-	SpeedSeconds int
-	MinSpeed     float64 // MB/s
-	Count        int
-	Recheck      int
-	KeepOld      bool
-	ExtraIPs     []string
-	Remark       string
-	Push         bool
-	GhToken      string
-	GhRepo       string
-	GhBranch     string
-	GhPath       string
+	Ports         []int
+	Sample        int
+	Threads       int
+	TCPTries      int
+	MaxLatency    int // ms
+	Countries     map[string]bool
+	Colos         map[string]bool
+	ValidateHost  string
+	ValidateHosts []string
+	GhProxy       string
+	ValidatePath  string
+	SpeedTest     bool
+	SpeedHost     string
+	SpeedBytes    int
+	SpeedSeconds  int
+	MinSpeed      float64 // MB/s
+	Count         int
+	Recheck       int
+	KeepOld       bool
+	ExtraIPs      []string
+	Remark        string
+	Push          bool
+	GhToken       string
+	GhRepo        string
+	GhBranch      string
+	GhPath        string
 }
 
 func parseUCI(text string) map[string][]string {
@@ -164,7 +168,18 @@ func loadConfig(src string) *Config {
 		Push: s("push", "0") == "1", GhToken: s("gh_token", ""), GhRepo: s("gh_repo", ""),
 		GhBranch: s("gh_branch", "main"), GhPath: s("gh_path", "xyip.txt"),
 		Countries: map[string]bool{}, Colos: map[string]bool{}, ExtraIPs: list("extra_ips"),
+		GhProxy: s("gh_proxy", ""),
 	}
+	for _, h := range list("validate_host") {
+		h = strings.TrimPrefix(strings.TrimPrefix(h, "https://"), "http://")
+		if h = strings.Trim(h, "/"); h != "" {
+			c.ValidateHosts = append(c.ValidateHosts, h)
+		}
+	}
+	if len(c.ValidateHosts) == 0 {
+		c.ValidateHosts = []string{"speed.cloudflare.com"}
+	}
+	c.ValidateHost = strings.Join(c.ValidateHosts, " ")
 	c.MinSpeed, _ = strconv.ParseFloat(s("min_speed", "1"), 64)
 	for _, p := range list("ports") {
 		if x, err := strconv.Atoi(p); err == nil && x > 0 && x < 65536 {
@@ -189,17 +204,17 @@ func loadConfig(src string) *Config {
 
 // ---------------------------------------------------------------- 结果
 type Result struct {
-	IP       string  `json:"ip"`
-	Port     int     `json:"port"`
-	Latency  float64 `json:"latency"`  // TCP 平均延迟 ms
-	HTTPMs   float64 `json:"http_ms"`  // HTTPS 验证请求耗时 ms
-	Colo     string  `json:"colo"`     // 机房
-	CC       string  `json:"cc"`       // 国家代码
-	Country  string  `json:"country"`  // 国家中文
-	City     string  `json:"city"`
-	Speed    float64 `json:"speed"`    // MB/s
-	Checks   int     `json:"checks"`   // 复验通过次数
-	tcpOK    int
+	IP      string  `json:"ip"`
+	Port    int     `json:"port"`
+	Latency float64 `json:"latency"` // TCP 平均延迟 ms
+	HTTPMs  float64 `json:"http_ms"` // HTTPS 验证请求耗时 ms
+	Colo    string  `json:"colo"`    // 机房
+	CC      string  `json:"cc"`      // 国家代码
+	Country string  `json:"country"` // 国家中文
+	City    string  `json:"city"`
+	Speed   float64 `json:"speed"`  // MB/s
+	Checks  int     `json:"checks"` // 复验通过次数
+	tcpOK   int
 }
 
 func (r *Result) Addr() string { return net.JoinHostPort(r.IP, strconv.Itoa(r.Port)) }
@@ -395,8 +410,26 @@ func clientFor(addr string, timeout time.Duration) *http.Client {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
+// 多个验证域名时每个都要通过（机房取第一个的）
 func validate(c *Config, r *Result) error {
-	host := c.ValidateHost
+	var first *Result
+	for _, h := range c.ValidateHosts {
+		t := *r
+		if err := validateOne(c, &t, h); err != nil {
+			if len(c.ValidateHosts) > 1 {
+				return fmt.Errorf("%s: %w", h, err)
+			}
+			return err
+		}
+		if first == nil {
+			first = &t
+		}
+	}
+	*r = *first
+	return nil
+}
+
+func validateOne(c *Config, r *Result, host string) error {
 	url := fmt.Sprintf("https://%s:%d%s", host, r.Port, c.ValidatePath)
 	if r.Port == 443 {
 		url = fmt.Sprintf("https://%s%s", host, c.ValidatePath)
@@ -540,7 +573,34 @@ func shortErr(err error) string {
 }
 
 // ---------------------------------------------------------------- 第 3 步：测速
-func speedTest(c *Config, r *Result) float64 {
+// 测速站（speed.cloudflare.com）短时间请求太多会限流（429）或直接断开，
+// 这种情况不是 IP 的问题：等几秒重试，最多 3 次，避免把好 IP 误杀。
+var speedLimited int32 // 本轮被测速站限流的次数
+
+func speedTest(c *Config, r *Result) (float64, string) {
+	why := ""
+	for try := 0; try < 4; try++ {
+		sp, w, retry := speedOnce(c, r)
+		if !retry {
+			return sp, w
+		}
+		why = w
+		if strings.Contains(w, "429") {
+			// 测速站按你的公网 IP 限流，约 1 分钟恢复；整体暂停后继续，不算 IP 的问题
+			n := atomic.AddInt32(&speedLimited, 1)
+			if n > 12 {
+				return 0, why + "，限流太频繁，放弃"
+			}
+			logf("  测速站限流（HTTP 429），暂停 60 秒后继续……")
+			time.Sleep(60 * time.Second)
+		} else {
+			time.Sleep(time.Duration(3*(try+1)) * time.Second)
+		}
+	}
+	return 0, why
+}
+
+func speedOnce(c *Config, r *Result) (float64, string, bool) {
 	url := fmt.Sprintf("https://%s:%d/__down?bytes=%d", c.SpeedHost, r.Port, c.SpeedBytes)
 	cl := clientFor(r.Addr(), 5*time.Second)
 	cl.Timeout = time.Duration(c.SpeedSeconds+6) * time.Second
@@ -548,20 +608,24 @@ func speedTest(c *Config, r *Result) float64 {
 	req.Header.Set("User-Agent", "Mozilla/5.0 cfyxip/"+Version)
 	resp, err := cl.Do(req)
 	if err != nil {
-		return 0
+		return 0, shortErr(err), true
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0
+		return 0, fmt.Sprintf("测速站 HTTP %d", resp.StatusCode), resp.StatusCode == 429 || resp.StatusCode >= 500
 	}
 	buf := make([]byte, 64*1024)
 	var n int64
 	t0 := time.Now()
 	deadline := t0.Add(time.Duration(c.SpeedSeconds) * time.Second)
+	var rerr error
 	for time.Now().Before(deadline) {
 		k, err := resp.Body.Read(buf)
 		n += int64(k)
 		if err != nil {
+			if err != io.EOF {
+				rerr = err
+			}
 			break
 		}
 	}
@@ -569,7 +633,10 @@ func speedTest(c *Config, r *Result) float64 {
 	if sec < 0.2 {
 		sec = 0.2
 	}
-	return float64(n) / sec / 1e6
+	if rerr != nil && n < 1<<20 { // 刚开始就被断开，多半是测速站的问题，重试
+		return 0, "下载中断：" + shortErr(rerr), true
+	}
+	return float64(n) / sec / 1e6, "", false
 }
 
 // ---------------------------------------------------------------- 主流程
@@ -632,9 +699,13 @@ func scan(cfgPath string) error {
 				break
 			}
 			tested++
-			r.Speed = speedTest(c, r)
+			var why string
+			r.Speed, why = speedTest(c, r)
 			atomic.AddInt64(&st.Done, 1)
-			logf("  %-21s %s %-4s 延迟 %5.0fms  速度 %.2f MB/s", r.Addr(), r.CC, r.Colo, r.Latency, r.Speed)
+			if why != "" {
+				why = "（" + why + "）"
+			}
+			logf("  %-21s %s %-4s 延迟 %5.0fms  速度 %.2f MB/s%s", r.Addr(), r.CC, r.Colo, r.Latency, r.Speed, why)
 			if r.Speed >= c.MinSpeed {
 				final = append(final, r)
 				atomic.AddInt64(&st.Found, 1)
@@ -763,6 +834,77 @@ func writeAtomic(p string, b []byte) error {
 }
 
 // ---------------------------------------------------------------- 推送 GitHub
+// 推送只访问 api.github.com（国内一般能直连）；连不上时可在设置里填 HTTP/SOCKS5 代理，只用于 GitHub
+func ghClient(c *Config) (*http.Client, error) {
+	tr := &http.Transport{Proxy: nil, TLSHandshakeTimeout: 15 * time.Second}
+	if c.GhProxy != "" {
+		u, err := url.Parse(c.GhProxy)
+		if err != nil || u.Host == "" {
+			return nil, fmt.Errorf("代理地址格式不对：%s（应如 http://192.168.2.1:7890 或 socks5://127.0.0.1:1080）", c.GhProxy)
+		}
+		tr.Proxy = http.ProxyURL(u)
+	}
+	return &http.Client{Timeout: 30 * time.Second, Transport: tr}, nil
+}
+
+func ghGet(c *Config, path string) (int, map[string]any, error) {
+	cl, err := ghClient(c)
+	if err != nil {
+		return 0, nil, err
+	}
+	req, _ := http.NewRequest("GET", "https://api.github.com"+path, nil)
+	req.Header.Set("Authorization", "Bearer "+c.GhToken)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "cfyxip")
+	resp, err := cl.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	var j map[string]any
+	json.NewDecoder(resp.Body).Decode(&j)
+	return resp.StatusCode, j, nil
+}
+
+// 检查推送设置：网络、令牌、仓库、写权限
+func ghCheck(c *Config) (string, error) {
+	if c.GhRepo == "" || !strings.Contains(c.GhRepo, "/") {
+		return "", errors.New("仓库没填或格式不对，应为 用户名/仓库名")
+	}
+	if c.GhToken == "" {
+		return "", errors.New("没有 GitHub 令牌：请在本页填写")
+	}
+	t0 := time.Now()
+	code, j, err := ghGet(c, "/repos/"+strings.Trim(c.GhRepo, "/"))
+	if err != nil {
+		return "", fmt.Errorf("连不上 api.github.com（%v）。可以稍后再试，或在「GitHub 代理」里填一个能访问 GitHub 的代理", err)
+	}
+	ms := time.Since(t0).Milliseconds()
+	switch code {
+	case 401:
+		return "", errors.New("令牌无效或已过期，请重新生成")
+	case 403:
+		return "", fmt.Errorf("被 GitHub 拒绝：%v", j["message"])
+	case 404:
+		return "", errors.New("找不到这个仓库：检查仓库名，或令牌的 Repository access 没有包含这个仓库")
+	case 200:
+	default:
+		return "", fmt.Errorf("GitHub 返回 HTTP %d：%v", code, j["message"])
+	}
+	perm, _ := j["permissions"].(map[string]any)
+	if perm != nil {
+		if push, _ := perm["push"].(bool); !push {
+			return "", errors.New("令牌对这个仓库没有写权限：Fine-grained 令牌要把 Contents 设为 Read and write")
+		}
+	}
+	vis := "公开"
+	if p, _ := j["private"].(bool); p {
+		vis = "私有（节点读不到 raw 文件，建议改成公开仓库）"
+	}
+	return fmt.Sprintf("一切正常：能连上 GitHub（%dms，%s），令牌有效，仓库 %s 为%s，有写权限。", ms,
+		map[bool]string{true: "经代理", false: "直连"}[c.GhProxy != ""], c.GhRepo, vis), nil
+}
+
 func push(c *Config) error {
 	if c.GhToken == "" || c.GhRepo == "" {
 		return errors.New("没有填 GitHub 仓库或令牌")
@@ -772,7 +914,10 @@ func push(c *Config) error {
 		return errors.New("还没有扫描结果")
 	}
 	api := "https://api.github.com/repos/" + strings.Trim(c.GhRepo, "/") + "/contents/" + strings.TrimLeft(c.GhPath, "/")
-	cl := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	cl, err := ghClient(c)
+	if err != nil {
+		return err
+	}
 	do := func(method, url string, payload any) (int, map[string]any, error) {
 		var rd io.Reader
 		if payload != nil {
@@ -787,7 +932,7 @@ func push(c *Config) error {
 			req.Header.Set("User-Agent", "cfyxip")
 			resp, err := cl.Do(req)
 			if err != nil {
-				lastErr = err
+				lastErr = fmt.Errorf("连不上 api.github.com：%v", err)
 				time.Sleep(3 * time.Second)
 				if payload != nil {
 					b, _ := json.Marshal(payload)
@@ -802,7 +947,7 @@ func push(c *Config) error {
 		}
 		return 0, nil, lastErr
 	}
-	code, j, err := do("GET", api+"?ref="+c.GhBranch, nil)
+	code, j, err := do("GET", api+"?ref="+url.QueryEscape(c.GhBranch), nil)
 	if err != nil {
 		return err
 	}
@@ -859,7 +1004,7 @@ func main() {
 	case "colos": // 给 LuCI 用：国家列表
 		type cc struct {
 			Code, Name string
-			Colos     []string
+			Colos      []string
 		}
 		m := map[string]*cc{}
 		for k, v := range colos {
@@ -875,6 +1020,14 @@ func main() {
 		}
 		sort.Slice(out, func(i, j int) bool { return out[i].Code < out[j].Code })
 		json.NewEncoder(os.Stdout).Encode(out)
+	case "ghcheck":
+		c := loadConfig(cfg)
+		msg, err := ghCheck(c)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		fmt.Println(msg)
 	case "push":
 		c := loadConfig(cfg)
 		if err := push(c); err != nil {
