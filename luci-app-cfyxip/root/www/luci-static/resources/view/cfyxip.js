@@ -155,9 +155,9 @@ return view.extend({
 			'用哪个域名的 /__down 接口测速，必须是 Cloudflare 官方测速站或兼容的接口。一般不用改。');
 		o.placeholder = 'speed.cloudflare.com'; o.depends('speed_test', '1');
 
-		o = s.taboption('speed', form.Value, 'validate_host', '验证域名',
+		o = s.taboption('speed', form.DynamicList, 'validate_host', '验证域名',
 			'验证 IP 能不能用时，把这个域名强制解析到被测 IP、正常校验证书去访问。<b>强烈建议填你节点自己的域名</b>（Workers 自定义域、Pages 域名或隧道的公网主机名），' +
-			'这样验证的就是「这个 IP 连你的节点能不能用」，被运营商按 SNI 干扰的 IP 也会被筛掉。必须是已开启 Cloudflare 代理（橙色云朵）的域名。默认 speed.cloudflare.com。');
+			'这样验证的就是「这个 IP 连你的节点能不能用」，被运营商按 SNI 干扰的 IP 也会被筛掉。必须是已开启 Cloudflare 代理（橙色云朵）的域名，只填域名，不要 https:// 和路径。可以填多个（每个节点一个），IP 必须每个都验证通过才算可用。不填 = speed.cloudflare.com。');
 		o.placeholder = 'speed.cloudflare.com';
 
 		o = s.taboption('speed', form.Value, 'validate_path', '验证路径',
@@ -188,22 +188,58 @@ return view.extend({
 		o.datatype = 'range(0,59)'; o.placeholder = '0';
 		o.depends('cron_enable', '1');
 
+		o = s.taboption('gh', form.DummyValue, '_ghguide');
+		o.rawhtml = true;
+		o.cfgvalue = function() {
+			return '<div style="background:#f5f9ff;border:1px solid #d6e4ff;border-radius:6px;padding:10px 14px;line-height:1.85">' +
+				'<b>推送到你自己的 GitHub 仓库（第一次用请按顺序做）</b><ol style="margin:.4em 0 .4em 1.2em">' +
+				'<li>登录 <a href="https://github.com/new" target="_blank" rel="noreferrer">github.com/new</a> 新建一个仓库，名字随意（如 <code>cf-ip</code>），选 <b>Public（公开）</b>，勾选 <b>Add a README file</b>（让仓库有 main 分支），点 Create repository。</li>' +
+				'<li>打开 <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">新建 Fine-grained 令牌</a>：Token name 随意；Expiration 选有效期（到期后回来换新的）；' +
+				'Repository access 选 <b>Only select repositories</b> 并选中刚建的仓库；Permissions → Repository permissions → <b>Contents</b> 改为 <b>Read and write</b>（Metadata 会自动变成只读，正常）；点 Generate token，复制以 <code>github_pat_</code> 开头的令牌。</li>' +
+				'<li>在下面填「仓库」（<code>你的用户名/仓库名</code>）和「GitHub 令牌」，勾选「扫描后推送」，点页面底部<b>保存并应用</b>。</li>' +
+				'<li>点下面的<b>检查推送设置</b>，显示「一切正常」就好了；再点页面上方的「推送到 GitHub」或等下次扫描自动推送。</li>' +
+				'<li>节点（edgetunnel 等）的优选 IP 订阅 / ADDAPI 填最下面的「引用地址」。</li></ol>' +
+				'<b>不用科学上网能推送吗？</b>能。推送只访问 <code>api.github.com</code>，国内电信/联通/移动一般都能直连（只是偶尔慢，程序会自动重试 3 次）。' +
+				'被墙的是 <code>raw.githubusercontent.com</code>，那只影响你在国内用浏览器打开文件；节点是 Cloudflare 的服务器去拉这个地址，在国外，不受影响。' +
+				'万一你的网络连不上 api.github.com，在下面「GitHub 代理」填一个能访问 GitHub 的代理即可。<br>' +
+				'<span style="color:#888">令牌只保存在这台路由器的 /etc/config/cfyxip 里，只发给 api.github.com，不会经过任何第三方加速站。</span></div>';
+		};
+
 		o = s.taboption('gh', form.Flag, 'push', '扫描后推送到 GitHub',
-			'每次扫描成功后，把 xyip.txt 推送到你的 GitHub 仓库（内容没变就不推）。节点里引用 raw 地址即可自动用上最新的优选 IP。');
+			'每次扫描成功后，把 xyip.txt 推送到你的 GitHub 仓库（内容没变就不提交）。');
 
 		o = s.taboption('gh', form.Value, 'gh_repo', '仓库',
-			'格式：用户名/仓库名，例如 zknjjjx/cf-preferred-ip。建议用公开仓库，否则节点读不到 raw 文件。');
+			'格式：<code>你的GitHub用户名/仓库名</code>，例如 <code>zhangsan/cf-ip</code>。仓库要事先建好、有至少一次提交（建仓库时勾 Add a README file）。建议公开仓库，私有仓库的 raw 地址节点读不到。');
 		o.placeholder = '用户名/仓库名';
+		o.validate = function(id, v) { return (!v || /^[\w.-]+\/[\w.-]+$/.test(v)) ? true : '格式应为 用户名/仓库名，不要带 https://github.com/'; };
 
-		o = s.taboption('gh', form.Value, 'gh_branch', '分支', '默认 main。');
+		o = s.taboption('gh', form.Value, 'gh_branch', '分支', '仓库的分支名，新建的仓库默认是 main（很老的仓库可能是 master）。');
 		o.placeholder = 'main';
 
-		o = s.taboption('gh', form.Value, 'gh_path', '文件路径', '仓库里的文件名，默认 xyip.txt（可以带目录，如 cf/xyip.txt）。');
+		o = s.taboption('gh', form.Value, 'gh_path', '文件路径', '保存到仓库里的文件名，默认 xyip.txt；可以带目录，如 cf/xyip.txt（目录不存在会自动创建）。文件已存在会被覆盖更新。');
 		o.placeholder = 'xyip.txt';
 
-		o = s.taboption('gh', form.Value, 'gh_token', 'GitHub 令牌（可留空）',
-			'留空 = 复用「AI 运维助手」里填过的 GitHub 令牌。单独填的话：GitHub → Settings → Developer settings → Fine-grained tokens，只选这个仓库，权限 Contents 设为 Read and write。');
+		o = s.taboption('gh', form.Value, 'gh_token', 'GitHub 令牌',
+			'按上面第 2 步生成的 Fine-grained 令牌（github_pat_ 开头）；老式 Classic 令牌（ghp_ 开头）也行，需勾 repo 权限。' +
+			'如果这台路由器装了「AI 运维助手」并填过 GitHub 令牌，这里可以留空，会自动复用那个令牌。');
 		o.password = true; o.placeholder = 'github_pat_...';
+
+		o = s.taboption('gh', form.Value, 'gh_proxy', 'GitHub 代理（可选）',
+			'一般留空（直连）。只有「检查推送设置」提示连不上 api.github.com 时才填：局域网里能访问 GitHub 的 HTTP 或 SOCKS5 代理，如 <code>http://192.168.2.1:7890</code>、<code>socks5://127.0.0.1:1080</code>（Clash / PassWall / OpenClash 等的本地端口）。只用于推送，扫描不走代理。' +
+			'<br>注意：不要填 gh-proxy.com 这类网页加速站，它们只能加速下载，不能推送，而且会拿到你的令牌。');
+		o.placeholder = '留空 = 直连';
+
+		o = s.taboption('gh', form.Button, '_ghcheck', '检查推送设置',
+			'用<b>已保存</b>的设置检查：能否连上 GitHub、令牌是否有效、仓库是否存在、有没有写权限。改完设置请先保存并应用再检查。');
+		o.inputtitle = '检查推送设置';
+		o.inputstyle = 'action';
+		o.onclick = function() {
+			ui.showModal('检查推送设置', [E('p', { 'class': 'spinning' }, '正在连接 GitHub…')]);
+			return runJSON(['ghcheck']).then(function(r) {
+				ui.showModal('检查推送设置', [E('p', { 'style': 'color:' + (r.ok ? '#2e7d32' : '#c62828') }, (r.ok ? '✓ ' : '✕ ') + r.msg),
+					E('div', { 'class': 'right' }, E('button', { 'class': 'btn', 'click': ui.hideModal }, '关闭'))]);
+			}).catch(function(e) { ui.hideModal(); notify(e.message, 'danger'); });
+		};
 
 		o = s.taboption('gh', form.DummyValue, '_raw', '引用地址');
 		o.rawhtml = true;
@@ -212,7 +248,7 @@ return view.extend({
 				p = this.map.data.get('cfyxip', sid, 'gh_path') || 'xyip.txt';
 			if (!repo) return '<span style="color:#888">填好仓库并保存后显示</span>';
 			var u = 'https://raw.githubusercontent.com/' + repo + '/' + br + '/' + p.replace(/^\//, '');
-			return '<code>' + u + '</code><div style="color:#888;font-size:90%">在 edgetunnel 等节点的 ADDAPI / 优选 IP 订阅里填这个地址。国内拉不动 raw 时可在前面加 https://gh-proxy.com/ 。</div>';
+			return '<code>' + u + '</code><div style="color:#888;font-size:90%">节点（edgetunnel 等）的优选 IP 订阅 / ADDAPI 直接填这个地址。在国内电脑上打不开属正常（raw 域名被墙），想自己查看可在前面加 https://gh-proxy.com/ 。</div>';
 		};
 
 		o = s.taboption('help', form.DummyValue, '_help');
