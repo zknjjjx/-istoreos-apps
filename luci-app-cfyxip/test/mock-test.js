@@ -1,6 +1,7 @@
 // 用假的 LuCI 环境跑一遍 cfyxip.js：load → render → 按钮 → 刷新，检查不会抛错
 global.window = global;
 const src = require('fs').readFileSync(process.argv[2] || 'root/www/luci-static/resources/view/cfyxip.js', 'utf8');
+if (!/^\s*'use strict';\s*('require [^']+';\s*)+/.test(src)) { console.error('FAIL: require 声明必须紧跟在 use strict 后面，否则 LuCI 加载不到模块'); process.exit(1); }
 function Node(tag, a, k) { this.tag = tag; this.attrs = a || {}; this.children = []; this.value = ''; this.scrollTop = 0; this.clientHeight = 0; this.scrollHeight = 0; if (k !== undefined) this.add(k); }
 Node.prototype.add = function(k) { if (Array.isArray(k)) k.forEach(x => this.add(x)); else if (k !== '' && k != null) this.children.push(k); };
 Node.prototype.appendChild = function(c) { this.children.push(c); return c; };
