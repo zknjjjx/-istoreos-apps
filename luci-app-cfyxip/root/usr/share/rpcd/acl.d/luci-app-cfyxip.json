@@ -1,0 +1,22 @@
+{
+	"luci-app-cfyxip": {
+		"description": "Cloudflare preferred IP scanner",
+		"read": {
+			"file": {
+				"/usr/libexec/cfyxip status": [ "exec" ],
+				"/usr/libexec/cfyxip log *": [ "exec" ],
+				"/usr/libexec/cfyxip result": [ "exec" ],
+				"/usr/libexec/cfyxip txt": [ "exec" ],
+				"/usr/libexec/cfyxip colos": [ "exec" ]
+			},
+			"uci": [ "cfyxip" ]
+		},
+		"write": {
+			"file": {
+				"/usr/libexec/cfyxip": [ "exec" ],
+				"/usr/libexec/cfyxip *": [ "exec" ]
+			},
+			"uci": [ "cfyxip" ]
+		}
+	}
+}
